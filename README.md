@@ -68,8 +68,8 @@ pveum user token add user@pam tokenname --privsep=0
 ### 2. クローンと環境設定
 
 ```bash
-git clone https://github.com/nnnnnnnnnke/proxmox-topology.git
-cd proxmox-topology
+git clone https://github.com/nnnnnnnnnke/proxmox-network-topology-visualizer.git
+cd proxmox-network-topology-visualizer
 
 # 環境変数ファイルを作成
 cp .env.example .env

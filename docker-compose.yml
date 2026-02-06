@@ -3,7 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: proxmox-topology-backend
+    container_name: pntv-backend
     environment:
       - PROXMOX_HOST=${PROXMOX_HOST:-https://localhost:8006}
       - PROXMOX_TOKEN_ID=${PROXMOX_TOKEN_ID}
@@ -13,7 +13,7 @@ services:
       - DEBUG=false
     restart: unless-stopped
     networks:
-      - proxmox-network
+      - pntv-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
       interval: 30s
@@ -25,7 +25,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: proxmox-topology-frontend
+    container_name: pntv-frontend
     environment:
       - REACT_APP_API_URL=http://localhost:5000
     ports:
@@ -34,8 +34,8 @@ services:
       - backend
     restart: unless-stopped
     networks:
-      - proxmox-network
+      - pntv-network
 
 networks:
-  proxmox-network:
+  pntv-network:
     driver: bridge
