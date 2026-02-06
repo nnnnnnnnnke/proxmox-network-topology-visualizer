@@ -1,26 +1,52 @@
 # Proxmox Network Topology Visualizer
 
-Proxmoxクラスタのネットワークトポロジを可視化するWebベースのダッシュボードです。物理ノード、仮想マシン、ネットワーク、VLAN、IPアドレス帯を視覚的に表示します。
+Proxmoxクラスタのネットワークトポロジを可視化するWebベースのダッシュボードです。
+手元のPC（Mac等）からリモートのProxmox VEサーバーにAPI経由で接続し、物理ノード、仮想マシン、ネットワーク、VLAN、IPアドレス帯を視覚的に表示します。
+
+## 構成概要
+
+```
+┌──────────────────────┐          ┌─────────────────────┐
+│  手元のPC (Mac等)     │          │  Proxmox VE Server  │
+│                      │          │                     │
+│  ┌────────────────┐  │  HTTPS   │  ┌───────────────┐  │
+│  │ Frontend       │  │          │  │ Proxmox API   │  │
+│  │ (Nginx:80)     │  │          │  │ (Port 8006)   │  │
+│  └───────┬────────┘  │          │  └───────────────┘  │
+│          │ /api/*    │          │                     │
+│  ┌───────▼────────┐  │          │                     │
+│  │ Backend        │──┼──────────┤                     │
+│  │ (Flask:5000)   │  │ API Token│                     │
+│  └────────────────┘  │          │                     │
+│                      │          │                     │
+│  (Docker Compose)    │          │                     │
+└──────────────────────┘          └─────────────────────┘
+```
+
+- **Frontend（Nginx）** がポート80でWebUIを提供し、`/api/*` へのリクエストをBackendにプロキシ
+- **Backend（Flask）** がProxmox VE APIにトークン認証で接続しトポロジデータを取得
+- バックエンドはDockerネットワーク内部のみで動作し、外部にポートを公開しない
 
 ## 機能
 
 - **リアルタイムトポロジ表示**: Proxmoxクラスタ全体のネットワーク構成を視覚化
 - **インタラクティブなグラフ**: ノードやエッジをクリックして詳細情報を表示
-- **自動更新**: 指定した間隔で自動的にデータを更新
-- **詳細情報表示**:
+- **自動更新**: 指定した間隔（10秒〜5分）で自動的にデータを更新
+- **対応リソース**:
   - 物理ノード（Proxmoxサーバー）
   - 仮想マシン（QEMU）
   - コンテナ（LXC）
   - ネットワークブリッジ
   - VLAN設定
   - IPアドレス情報
-  - SDN VNET（設定されている場合）
+  - SDN VNET
 
 ## 前提条件
 
 - Proxmox VE 7.0以上
-- Docker & Docker Compose
+- Docker & Docker Compose（手元のPC側）
 - Proxmox APIトークン
+- 手元のPCからProxmoxサーバーのポート8006にアクセス可能であること
 
 ## セットアップ
 
@@ -28,185 +54,118 @@ Proxmoxクラスタのネットワークトポロジを可視化するWebベー�
 
 Proxmox WebUIで以下の手順でAPIトークンを作成します：
 
-```bash
-# CLI経由での作成例
-pveum user token add user@pam tokenname --privsep=0
-```
-
-または、WebUI:
 1. Datacenter → Permissions → API Tokens
 2. "Add"をクリック
 3. ユーザーとトークンIDを入力
 4. "Privilege Separation"のチェックを外す（必要に応じて）
 5. 生成されたトークンシークレットを保存
 
-### 2. リポジトリのクローンと設定
+CLI経由の場合：
+```bash
+pveum user token add user@pam tokenname --privsep=0
+```
+
+### 2. クローンと環境設定
 
 ```bash
-# リポジトリをクローン
-git clone <repository-url>
+git clone https://github.com/nnnnnnnnnke/proxmox-topology.git
 cd proxmox-topology
 
 # 環境変数ファイルを作成
 cp .env.example .env
-
-# .envファイルを編集してProxmox情報を設定
-nano .env
 ```
 
-`.env`ファイルの設定例：
+`.env` を編集してProxmoxサーバーの情報を設定：
 ```bash
+# Proxmox VEサーバーのアドレス（リモートサーバーのIP/ホスト名）
 PROXMOX_HOST=https://192.168.1.100:8006
 PROXMOX_TOKEN_ID=root@pam!topology
 PROXMOX_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 VERIFY_SSL=false
 ```
 
-### 3. Docker Composeで起動
+### 3. 起動
 
 ```bash
-# コンテナをビルド＆起動
-docker-compose up -d
-
-# ログを確認
-docker-compose logs -f
+docker compose up -d
 ```
 
 ### 4. アクセス
 
-ブラウザで以下のURLにアクセス：
+ブラウザで手元のPCから：
 ```
-http://<proxmox-server-ip>
-```
-
-## アーキテクチャ
-
-```
-┌─────────────────┐
-│   Frontend      │
-│   (React +      │
-│   Cytoscape.js) │
-│   Port: 80      │
-└────────┬────────┘
-         │
-         │ HTTP/REST API
-         │
-┌────────▼────────┐
-│   Backend       │
-│   (Flask)       │
-│   Port: 5000    │
-└────────┬────────┘
-         │
-         │ Proxmox API
-         │
-┌────────▼────────┐
-│   Proxmox VE    │
-│   Cluster       │
-└─────────────────┘
+http://localhost
 ```
 
 ## API エンドポイント
 
-バックエンドは以下のAPIエンドポイントを提供します：
+Nginx経由で `http://localhost/api/*` としてアクセスできます：
 
-- `GET /api/health` - ヘルスチェック
-- `GET /api/topology` - 完全なトポロジデータ
-- `GET /api/nodes` - ノード一覧
-- `GET /api/nodes/<node>/network` - ノードのネットワーク設定
-- `GET /api/nodes/<node>/vms` - ノードのVM一覧
-- `GET /api/cluster/status` - クラスタステータス
-- `GET /api/config` - 現在の設定情報
+| エンドポイント | 説明 |
+|---|---|
+| `GET /api/health` | ヘルスチェック |
+| `GET /api/topology` | 完全なトポロジデータ |
+| `GET /api/nodes` | ノード一覧 |
+| `GET /api/nodes/<node>/network` | ノードのネットワーク設定 |
+| `GET /api/nodes/<node>/vms` | ノードのVM一覧 |
+| `GET /api/cluster/status` | クラスタステータス |
+| `GET /api/config` | 現在の設定情報 |
 
 ## トポロジグラフの凡例
 
-- 🔵 **青色・四角**: 物理ノード（Proxmoxサーバー）
-- 🟢 **緑色・円**: 仮想マシン（QEMU VM）
-- 🟠 **オレンジ・六角形**: LXCコンテナ
-- 🟣 **紫色・ダイヤ**: ネットワークブリッジ
-- 🔷 **シアン・三角**: VLAN
-- 🔴 **赤色・星**: SDN VNET
-
-## カスタマイズ
-
-### 更新間隔の変更
-
-UIの"Auto-refresh"チェックボックスをオンにして、ドロップダウンから更新間隔を選択できます：
-- 10秒
-- 30秒
-- 1分
-- 5分
-
-### ネットワーク表示のカスタマイズ
-
-`frontend/src/components/TopologyView.jsx`のCytoscapeスタイル設定を編集することで、ノードやエッジの見た目をカスタマイズできます。
-
-### レイアウトアルゴリズムの変更
-
-デフォルトでは`cola`レイアウトを使用していますが、他のレイアウトに変更可能です：
-- `grid` - グリッドレイアウト
-- `circle` - 円形レイアウト
-- `concentric` - 同心円レイアウト
-- `breadthfirst` - 階層レイアウト
+| 色 | 形 | リソースタイプ |
+|---|---|---|
+| 青 | 四角 | 物理ノード（Proxmoxサーバー） |
+| 緑 | 円 | 仮想マシン（QEMU VM） |
+| オレンジ | 六角形 | LXCコンテナ |
+| 紫 | ダイヤ | ネットワークブリッジ |
+| シアン | 三角 | VLAN |
+| 赤 | 星 | SDN VNET |
 
 ## トラブルシューティング
 
-### 接続エラー
+### Proxmox APIに接続できない
 
 ```bash
-# バックエンドのログを確認
-docker-compose logs backend
-
-# Proxmox APIへの接続をテスト
-curl -k -H "Authorization: PVEAPIToken=<TOKEN_ID>=<TOKEN_SECRET>" \
-  https://<PROXMOX_HOST>:8006/api2/json/cluster/resources
+# 手元のPCからProxmox APIへの疎通を確認
+curl -sk https://<PROXMOX_HOST>:8006/api2/json/version \
+  -H "Authorization: PVEAPIToken=<TOKEN_ID>=<TOKEN_SECRET>"
 ```
 
-### データが表示されない
+接続できない場合：
+- Proxmoxサーバーのファイアウォールでポート8006が許可されているか確認
+- VPN/Tailscale等の経路が有効か確認
+- APIトークンの権限を確認
 
-1. APIトークンの権限を確認
-2. ファイアウォール設定を確認
-3. ProxmoxホストのURLが正しいか確認
+### コンテナのログを確認
+
+```bash
+docker compose logs backend
+docker compose logs frontend
+```
 
 ### SSL証明書エラー
 
-自己署名証明書を使用している場合は、`.env`ファイルで以下を設定：
-```bash
-VERIFY_SSL=false
-```
+自己署名証明書を使用している場合は `.env` で `VERIFY_SSL=false` を設定してください。
 
 ## 開発
 
-### ローカル開発環境
+### ローカル開発環境（Docker不使用）
 
 ```bash
 # バックエンド
 cd backend
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements.txt
 python app.py
 
-# フロントエンド
+# フロントエンド（別ターミナル）
 cd frontend
 npm install
 npm start
 ```
 
-## セキュリティ上の注意
-
-- 本番環境では適切なSSL証明書を使用してください
-- APIトークンは安全に保管してください
-- ネットワークアクセスを適切に制限してください
-- 定期的にProxmoxとDockerイメージを更新してください
-
 ## ライセンス
 
 MIT License
-
-## 貢献
-
-プルリクエストを歓迎します。大きな変更の場合は、まずissueを開いて変更内容を議論してください。
-
-## サポート
-
-問題が発生した場合は、GitHubのissueで報告してください。
