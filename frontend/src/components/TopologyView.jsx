@@ -16,7 +16,7 @@ const TopologyView = ({ topologyData }) => {
     // Cytoscapeインスタンスを初期化
     const cy = cytoscape({
       container: containerRef.current,
-      
+
       elements: {
         nodes: topologyData.nodes.map(node => ({
           data: {
@@ -53,7 +53,7 @@ const TopologyView = ({ topologyData }) => {
             'background-color': '#fff'
           }
         },
-        
+
         // 物理ノード（Proxmoxサーバー）
         {
           selector: 'node[type="physical_node"]',
@@ -68,7 +68,7 @@ const TopologyView = ({ topologyData }) => {
             'text-outline-color': '#4A90E2'
           }
         },
-        
+
         // VM
         {
           selector: 'node[type="vm"]',
@@ -79,7 +79,7 @@ const TopologyView = ({ topologyData }) => {
             'height': '80px'
           }
         },
-        
+
         // コンテナ
         {
           selector: 'node[type="container"]',
@@ -90,7 +90,7 @@ const TopologyView = ({ topologyData }) => {
             'height': '80px'
           }
         },
-        
+
         // ブリッジネットワーク
         {
           selector: 'node[type="bridge"]',
@@ -101,7 +101,7 @@ const TopologyView = ({ topologyData }) => {
             'height': '100px'
           }
         },
-        
+
         // VLAN
         {
           selector: 'node[type="vlan"]',
@@ -112,7 +112,7 @@ const TopologyView = ({ topologyData }) => {
             'height': '90px'
           }
         },
-        
+
         // SDN VNET
         {
           selector: 'node[type="sdn_vnet"]',
@@ -123,7 +123,7 @@ const TopologyView = ({ topologyData }) => {
             'height': '100px'
           }
         },
-        
+
         // エッジ（接続線）
         {
           selector: 'edge',
@@ -139,7 +139,7 @@ const TopologyView = ({ topologyData }) => {
             'text-margin-y': -10
           }
         },
-        
+
         // 物理接続
         {
           selector: 'edge[type="physical_connection"]',
@@ -149,7 +149,7 @@ const TopologyView = ({ topologyData }) => {
             'line-style': 'solid'
           }
         },
-        
+
         // ネットワーク接続
         {
           selector: 'edge[type="network_connection"]',
@@ -158,7 +158,7 @@ const TopologyView = ({ topologyData }) => {
             'width': 2
           }
         },
-        
+
         // VLAN接続
         {
           selector: 'edge[vlan]',
@@ -168,7 +168,7 @@ const TopologyView = ({ topologyData }) => {
             'width': 2
           }
         },
-        
+
         // ホスト関係
         {
           selector: 'edge[type="hosts"]',
@@ -179,7 +179,37 @@ const TopologyView = ({ topologyData }) => {
             'target-arrow-shape': 'none'
           }
         },
-        
+
+        // 非ハイライト時（薄く表示）
+        {
+          selector: '.faded',
+          style: {
+            'opacity': 0.15
+          }
+        },
+
+        // ハイライトされたノード
+        {
+          selector: 'node.highlighted',
+          style: {
+            'border-width': '4px',
+            'border-color': '#FF6B00',
+            'opacity': 1
+          }
+        },
+
+        // ハイライトされたエッジ
+        {
+          selector: 'edge.highlighted',
+          style: {
+            'width': 5,
+            'line-color': '#FF6B00',
+            'target-arrow-color': '#FF6B00',
+            'opacity': 1,
+            'z-index': 10
+          }
+        },
+
         // 選択状態
         {
           selector: ':selected',
@@ -195,12 +225,22 @@ const TopologyView = ({ topologyData }) => {
         name: 'cola',
         animate: true,
         randomize: false,
-        maxSimulationTime: 4000,
-        nodeSpacing: 100,
-        edgeLength: 200,
+        maxSimulationTime: 8000,
         fit: true,
         padding: 50,
-        componentSpacing: 150
+        nodeSpacing: 40,
+        edgeLengthVal: 150,
+        edgeLength: function(edge) {
+          // ブリッジ↔物理ノード間は短く、VM↔ブリッジはやや長く、hosts は長め
+          var type = edge.data('type');
+          if (type === 'physical_connection') return 120;
+          if (type === 'network_connection') return 180;
+          return 250; // hosts
+        },
+        convergenceThreshold: 0.01,
+        componentSpacing: 100,
+        ungrabifyWhileSimulating: false,
+        avoidOverlap: true
       },
 
       wheelSensitivity: 0.2,
@@ -208,21 +248,40 @@ const TopologyView = ({ topologyData }) => {
       maxZoom: 3
     });
 
-    // クリックイベント
+    // ハイライトをリセットするヘルパー
+    function clearHighlights() {
+      cy.elements().removeClass('highlighted faded');
+    }
+
+    // ノードクリック: 関連エッジと隣接ノードをハイライト
     cy.on('tap', 'node', (event) => {
       const node = event.target;
       setSelectedElement(node.data());
+
+      clearHighlights();
+      cy.elements().addClass('faded');
+      node.removeClass('faded').addClass('highlighted');
+      node.connectedEdges().removeClass('faded').addClass('highlighted');
+      node.neighborhood('node').removeClass('faded').addClass('highlighted');
     });
 
+    // エッジクリック: そのエッジと両端ノードをハイライト
     cy.on('tap', 'edge', (event) => {
       const edge = event.target;
       setSelectedElement(edge.data());
+
+      clearHighlights();
+      cy.elements().addClass('faded');
+      edge.removeClass('faded').addClass('highlighted');
+      edge.source().removeClass('faded').addClass('highlighted');
+      edge.target().removeClass('faded').addClass('highlighted');
     });
 
-    // 背景クリックで選択解除
+    // 背景クリックで選択・ハイライト解除
     cy.on('tap', (event) => {
       if (event.target === cy) {
         setSelectedElement(null);
+        clearHighlights();
         cy.$(':selected').unselect();
       }
     });
@@ -247,7 +306,7 @@ const TopologyView = ({ topologyData }) => {
           border: '1px solid #ddd'
         }}
       />
-      
+
       {selectedElement && (
         <div style={{
           width: '350px',
@@ -259,12 +318,12 @@ const TopologyView = ({ topologyData }) => {
           <h3 style={{ marginTop: 0, borderBottom: '2px solid #4A90E2', paddingBottom: '10px' }}>
             {selectedElement.label || selectedElement.id}
           </h3>
-          
+
           <div style={{ fontSize: '14px' }}>
             <p><strong>Type:</strong> {selectedElement.type}</p>
-            
+
             {selectedElement.status && (
-              <p><strong>Status:</strong> 
+              <p><strong>Status:</strong>
                 <span style={{
                   color: selectedElement.status === 'running' || selectedElement.status === 'online' ? 'green' : 'red',
                   marginLeft: '5px'
@@ -273,39 +332,39 @@ const TopologyView = ({ topologyData }) => {
                 </span>
               </p>
             )}
-            
+
             {selectedElement.vmid && (
               <p><strong>VM ID:</strong> {selectedElement.vmid}</p>
             )}
-            
+
             {selectedElement.node && (
               <p><strong>Host Node:</strong> {selectedElement.node}</p>
             )}
-            
+
             {selectedElement.cpu && (
               <p><strong>CPU:</strong> {selectedElement.cpu}</p>
             )}
-            
+
             {selectedElement.mem && (
               <p><strong>Memory:</strong> {(selectedElement.mem / 1024 / 1024 / 1024).toFixed(2)} GB</p>
             )}
-            
+
             {selectedElement.vlan && (
               <p><strong>VLAN:</strong> {selectedElement.vlan}</p>
             )}
-            
+
             {selectedElement.vlan_id && (
               <p><strong>VLAN ID:</strong> {selectedElement.vlan_id}</p>
             )}
-            
+
             {selectedElement.cidr && (
               <p><strong>CIDR:</strong> {selectedElement.cidr}</p>
             )}
-            
+
             {selectedElement.gateway && (
               <p><strong>Gateway:</strong> {selectedElement.gateway}</p>
             )}
-            
+
             {selectedElement.ips && selectedElement.ips.length > 0 && (
               <div>
                 <p><strong>IP Addresses:</strong></p>
@@ -316,15 +375,15 @@ const TopologyView = ({ topologyData }) => {
                 </ul>
               </div>
             )}
-            
+
             {selectedElement.mac && (
               <p><strong>MAC:</strong> {selectedElement.mac}</p>
             )}
-            
+
             {selectedElement.interface && (
               <p><strong>Interface:</strong> {selectedElement.interface}</p>
             )}
-            
+
             {selectedElement.bridge_vlan_aware && (
               <p><strong>VLAN Aware:</strong> {selectedElement.bridge_vlan_aware ? 'Yes' : 'No'}</p>
             )}

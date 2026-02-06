@@ -2,6 +2,8 @@
 
 A web-based dashboard that visualizes the network topology of a Proxmox VE cluster. It runs on your local PC (e.g. Mac) via Docker Compose and connects to a remote Proxmox VE server through the API to display physical nodes, VMs, networks, VLANs, and IP address ranges interactively.
 
+![Topology Overview](docs/images/topology-overview.png)
+
 ## Architecture
 
 ```
@@ -172,6 +174,8 @@ npm start
 
 Proxmoxクラスタのネットワークトポロジを可視化するWebベースのダッシュボードです。
 手元のPC（Mac等）からリモートのProxmox VEサーバーにAPI経由で接続し、物理ノード、仮想マシン、ネットワーク、VLAN、IPアドレス帯を視覚的に表示します。
+
+![トポロジ表示イメージ](docs/images/topology-overview.png)
 
 ## 構成概要
 
