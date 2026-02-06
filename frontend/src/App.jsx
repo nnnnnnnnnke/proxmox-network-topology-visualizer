@@ -55,7 +55,7 @@ function App() {
     <div className="App">
       <header className="App-header">
         <div className="header-content">
-          <h1>Proxmox Network Topology</h1>
+          <h1>Proxmox Network Topology Visualizer</h1>
           
           {summary && (
             <div className="summary">

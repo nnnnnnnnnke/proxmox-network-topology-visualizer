@@ -62,7 +62,7 @@ sleep 10
 
 # ヘルスチェック
 echo "🏥 Checking backend health..."
-if curl -s http://localhost:5000/api/health > /dev/null; then
+if curl -s http://localhost/api/health > /dev/null; then
     echo "✅ Backend is healthy!"
 else
     echo "⚠️  Backend might not be ready yet. Check logs with: docker compose logs backend"
@@ -74,7 +74,7 @@ echo "✅ Deployment complete!"
 echo "=========================================="
 echo ""
 echo "📊 Access the dashboard at: http://localhost"
-echo "🔧 Backend API at: http://localhost:5000"
+echo "🔧 API endpoint: http://localhost/api"
 echo ""
 echo "Useful commands:"
 echo "  View logs:     docker compose logs -f"
