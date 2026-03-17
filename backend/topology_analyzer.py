@@ -44,21 +44,17 @@ class TopologyAnalyzer:
                     ips.append(match.group(1))
         return ips
 
-    def get_guest_agent_ips(self, node_name: str, vmid: int) -> List[str]:
-        """QEMU Guest Agent経由で実際のIPアドレスを取得"""
+    def extract_agent_ips(self, interfaces: list) -> List[str]:
+        """Guest Agentのインターフェース情報からIPv4を抽出"""
         ips = []
-        try:
-            interfaces = self.client.get_vm_agent_interfaces(node_name, vmid)
-            for iface in interfaces:
-                if iface.get('name') == 'lo':
-                    continue
-                for addr in iface.get('ip-addresses', []):
-                    ip = addr.get('ip-address', '')
-                    prefix = addr.get('prefix', '')
-                    if addr.get('ip-address-type') == 'ipv4' and ip:
-                        ips.append(f"{ip}/{prefix}" if prefix else ip)
-        except Exception:
-            pass
+        for iface in interfaces:
+            if iface.get('name') == 'lo':
+                continue
+            for addr in iface.get('ip-addresses', []):
+                ip = addr.get('ip-address', '')
+                prefix = addr.get('prefix', '')
+                if addr.get('ip-address-type') == 'ipv4' and ip:
+                    ips.append(f"{ip}/{prefix}" if prefix else ip)
         return ips
 
     def analyze_topology(self, hide_stopped=True, hide_hosts_edges=True,
@@ -100,6 +96,10 @@ class TopologyAnalyzer:
 
         # Proxmoxノードを取得
         pve_nodes = self.client.get_nodes()
+
+        # 全ノードのVM/コンテナとconfigを先に収集
+        all_vms_data = []  # (node_name, vm, config, vm_type)
+        agent_tasks = []   # Guest Agent取得対象 (node, vmid)
 
         for pve_node in pve_nodes:
             node_name = pve_node['node']
@@ -149,15 +149,13 @@ class TopologyAnalyzer:
             except Exception as e:
                 logger.error(f"Failed to get network config for node {node_name}: {e}")
 
-            # VM/コンテナを取得
+            # VM/コンテナを取得してconfigを収集
             try:
                 vms = self.client.get_vms(node_name)
                 for vm in vms:
                     vmid = vm['vmid']
-                    vm_name = vm.get('name', f'VM-{vmid}')
                     vm_type = vm.get('type', 'qemu')
                     vm_status = vm.get('status', 'unknown')
-                    vm_id = f"vm-{node_name}-{vmid}"
                     total_vm_count += 1
 
                     if vm_status == 'running':
@@ -168,107 +166,116 @@ class TopologyAnalyzer:
                     if hide_stopped and vm_status != 'running':
                         continue
 
-                    # IP取得: Guest Agent → cloud-init → LXC config の順でフォールバック
-                    ips = []
-                    if vm_type == 'qemu' and vm_status == 'running':
-                        ips = self.get_guest_agent_ips(node_name, vmid)
-
-                    nodes.append({
-                        'id': vm_id,
-                        'label': vm_name,
-                        'type': 'vm' if vm_type == 'qemu' else 'container',
-                        'vmid': vmid,
-                        'status': vm_status,
-                        'node': node_name,
-                        'cpu': vm.get('maxcpu', 0),
-                        'mem': vm.get('maxmem', 0),
-                        'ips': ips
-                    })
-
-                    if not hide_hosts_edges and not hide_physical_node:
-                        edges.append({
-                            'source': node_id,
-                            'target': vm_id,
-                            'type': 'hosts',
-                            'label': 'hosts'
-                        })
-
-                    # VMのネットワーク設定
+                    # VM configを取得
                     try:
                         config = self.client.get_vm_config(node_name, vmid, vm_type)
-
-                        # cloud-init / LXC config からのIP（Guest Agentで取れなかった場合のフォールバック）
-                        if not ips:
-                            if vm_type == 'qemu':
-                                ips = self.extract_ip_from_config(config)
-                            else:
-                                ips = self.extract_ip_from_lxc_config(config)
-                            # ノードデータにIPを反映
-                            if ips:
-                                for n in nodes:
-                                    if n['id'] == vm_id:
-                                        n['ips'] = ips
-                                        break
-
-                        for key, value in config.items():
-                            if key.startswith('net') and isinstance(value, str):
-                                net_info = self.parse_network_config(value)
-                                bridge = net_info.get('bridge', '')
-                                vlan_tag = net_info.get('tag', '')
-
-                                if bridge:
-                                    if bridge in sdn_bridge_names:
-                                        target_net = f"sdn-{bridge}"
-                                    else:
-                                        target_net = f"network-{bridge}"
-
-                                    # VLANタグがある場合、VLANノードを経由
-                                    if vlan_tag:
-                                        vlan_key = f"{bridge}-vlan-{vlan_tag}"
-                                        if vlan_key not in vlans:
-                                            vlans[vlan_key] = {
-                                                'id': f"vlan-{bridge}-{vlan_tag}",
-                                                'label': f"VLAN {vlan_tag}",
-                                                'type': 'vlan',
-                                                'vlan_id': vlan_tag,
-                                                'parent_bridge': bridge
-                                            }
-                                            # VLANノード → ブリッジへのエッジ
-                                            edges.append({
-                                                'source': f"vlan-{bridge}-{vlan_tag}",
-                                                'target': target_net,
-                                                'type': 'vlan_connection',
-                                                'interface': f"VLAN {vlan_tag}",
-                                            })
-
-                                        # VM → VLANノードへのエッジ
-                                        edge_data = {
-                                            'source': vm_id,
-                                            'target': f"vlan-{bridge}-{vlan_tag}",
-                                            'type': 'network_connection',
-                                            'interface': key,
-                                            'mac': net_info.get('mac', ''),
-                                            'vlan': vlan_tag,
-                                        }
-                                    else:
-                                        # VLANなし → 直接ブリッジへ
-                                        edge_data = {
-                                            'source': vm_id,
-                                            'target': target_net,
-                                            'type': 'network_connection',
-                                            'interface': key,
-                                            'mac': net_info.get('mac', ''),
-                                        }
-
-                                    if ips:
-                                        edge_data['ips'] = ips
-                                    edges.append(edge_data)
-
                     except Exception as e:
                         logger.warning(f"Failed to get VM config for {vmid}: {e}")
+                        config = {}
+
+                    all_vms_data.append((node_name, vm, config, vm_type))
+
+                    # Guest Agent対象を収集（QEMUかつrunningかつagent有効）
+                    if (vm_type == 'qemu' and vm_status == 'running'
+                            and config.get('agent', '0').split(',')[0] == '1'):
+                        agent_tasks.append((node_name, vmid))
 
             except Exception as e:
                 logger.error(f"Failed to get VMs for node {node_name}: {e}")
+
+        # Guest Agent情報を並列で一括取得
+        agent_results = {}
+        if agent_tasks:
+            agent_results = self.client.get_vm_agent_interfaces_batch(agent_tasks)
+
+        # VM/コンテナ ノードとエッジを構築
+        for node_name, vm, config, vm_type in all_vms_data:
+            vmid = vm['vmid']
+            vm_name = vm.get('name', f'VM-{vmid}')
+            vm_status = vm.get('status', 'unknown')
+            vm_id = f"vm-{node_name}-{vmid}"
+            node_id = f"node-{node_name}"
+
+            # IP取得: Guest Agent → cloud-init → LXC config
+            ips = []
+            if vmid in agent_results and agent_results[vmid]:
+                ips = self.extract_agent_ips(agent_results[vmid])
+            if not ips:
+                if vm_type == 'qemu':
+                    ips = self.extract_ip_from_config(config)
+                else:
+                    ips = self.extract_ip_from_lxc_config(config)
+
+            nodes.append({
+                'id': vm_id,
+                'label': vm_name,
+                'type': 'vm' if vm_type == 'qemu' else 'container',
+                'vmid': vmid,
+                'status': vm_status,
+                'node': node_name,
+                'cpu': vm.get('maxcpu', 0),
+                'mem': vm.get('maxmem', 0),
+                'ips': ips
+            })
+
+            if not hide_hosts_edges and not hide_physical_node:
+                edges.append({
+                    'source': node_id,
+                    'target': vm_id,
+                    'type': 'hosts',
+                    'label': 'hosts'
+                })
+
+            # ネットワークエッジ
+            for key, value in config.items():
+                if key.startswith('net') and isinstance(value, str):
+                    net_info = self.parse_network_config(value)
+                    bridge = net_info.get('bridge', '')
+                    vlan_tag = net_info.get('tag', '')
+
+                    if bridge:
+                        if bridge in sdn_bridge_names:
+                            target_net = f"sdn-{bridge}"
+                        else:
+                            target_net = f"network-{bridge}"
+
+                        if vlan_tag:
+                            vlan_key = f"{bridge}-vlan-{vlan_tag}"
+                            if vlan_key not in vlans:
+                                vlans[vlan_key] = {
+                                    'id': f"vlan-{bridge}-{vlan_tag}",
+                                    'label': f"VLAN {vlan_tag}",
+                                    'type': 'vlan',
+                                    'vlan_id': vlan_tag,
+                                    'parent_bridge': bridge
+                                }
+                                edges.append({
+                                    'source': f"vlan-{bridge}-{vlan_tag}",
+                                    'target': target_net,
+                                    'type': 'vlan_connection',
+                                    'interface': f"VLAN {vlan_tag}",
+                                })
+
+                            edge_data = {
+                                'source': vm_id,
+                                'target': f"vlan-{bridge}-{vlan_tag}",
+                                'type': 'network_connection',
+                                'interface': key,
+                                'mac': net_info.get('mac', ''),
+                                'vlan': vlan_tag,
+                            }
+                        else:
+                            edge_data = {
+                                'source': vm_id,
+                                'target': target_net,
+                                'type': 'network_connection',
+                                'interface': key,
+                                'mac': net_info.get('mac', ''),
+                            }
+
+                        if ips:
+                            edge_data['ips'] = ips
+                        edges.append(edge_data)
 
         # ネットワークノードを追加
         for net_id, net_info in networks.items():
@@ -278,7 +285,7 @@ class TopologyAnalyzer:
         for vlan_key, vlan_info in vlans.items():
             nodes.append(vlan_info)
 
-        # SDN VNetノードを追加（Zone・Subnet情報付き）
+        # SDN VNetノードを追加
         for vnet in sdn_vnets:
             vnet_name = vnet['vnet']
             vnet_id = f"sdn-{vnet_name}"
@@ -302,7 +309,7 @@ class TopologyAnalyzer:
                 'snat': snat_enabled,
             })
 
-        # 接続VMがないネットワークを除去
+        # 接続のないネットワークを除去
         connected_targets = set()
         for e in edges:
             if e['type'] in ('network_connection', 'vlan_connection'):

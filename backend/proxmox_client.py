@@ -2,6 +2,7 @@ import requests
 import urllib3
 from typing import Dict, List, Optional
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -19,7 +20,8 @@ class ProxmoxClient:
             'Authorization': f'PVEAPIToken={token_id}={token_secret}'
         }
 
-    def _request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict:
+    def _request(self, method: str, endpoint: str, params: Optional[Dict] = None,
+                 timeout: int = 10) -> Dict:
         url = f"{self.host}/api2/json{endpoint}"
         try:
             response = requests.request(
@@ -28,7 +30,7 @@ class ProxmoxClient:
                 headers=self.headers,
                 params=params,
                 verify=self.verify_ssl,
-                timeout=10
+                timeout=timeout
             )
             response.raise_for_status()
             return response.json().get('data', {})
@@ -53,11 +55,29 @@ class ProxmoxClient:
     def get_vm_agent_interfaces(self, node: str, vmid: int) -> List[Dict]:
         """QEMU Guest Agent経由でVMの実際のネットワークインターフェース情報を取得"""
         try:
-            result = self._request('GET', f'/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces')
+            result = self._request(
+                'GET', f'/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces',
+                timeout=3
+            )
             return result.get('result', []) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.debug(f"Guest agent not available for VM {vmid}: {e}")
+        except Exception:
             return []
+
+    def get_vm_agent_interfaces_batch(self, tasks: list) -> Dict[int, List[Dict]]:
+        """複数VMのGuest Agent情報を並列取得。tasks = [(node, vmid), ...]"""
+        results = {}
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {
+                executor.submit(self.get_vm_agent_interfaces, node, vmid): vmid
+                for node, vmid in tasks
+            }
+            for future in as_completed(futures):
+                vmid = futures[future]
+                try:
+                    results[vmid] = future.result()
+                except Exception:
+                    results[vmid] = []
+        return results
 
     def get_cluster_status(self) -> Dict:
         return self._request('GET', '/cluster/status')
@@ -77,7 +97,6 @@ class ProxmoxClient:
             return []
 
     def get_sdn_subnets(self, vnet: str) -> List[Dict]:
-        """SDN VNetのサブネット情報を取得"""
         try:
             return self._request('GET', f'/cluster/sdn/vnets/{vnet}/subnets')
         except Exception as e:
