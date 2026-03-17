@@ -3,15 +3,26 @@ import cytoscape from 'cytoscape';
 
 const computeLayout = (nodes, edges) => {
   const hubs = nodes.filter(n => n.type === 'bridge' || n.type === 'sdn_vnet');
-  const physNode = nodes.find(n => n.type === 'physical_node');
+  const vlanNodes = nodes.filter(n => n.type === 'vlan');
+  const physNodes = nodes.filter(n => n.type === 'physical_node');
 
-  // Group VMs by their connected hub
+  // Group VMs/containers by their connected hub (or VLAN)
   const hubVMs = {};
   hubs.forEach(h => { hubVMs[h.id] = []; });
+  vlanNodes.forEach(v => { hubVMs[v.id] = []; });
+
   edges.forEach(e => {
     if (e.type === 'network_connection' && hubVMs[e.target]) {
       const vm = nodes.find(n => n.id === e.source);
       if (vm) hubVMs[e.target].push(vm);
+    }
+  });
+
+  // Find which hub each VLAN connects to
+  const vlanParentHub = {};
+  edges.forEach(e => {
+    if (e.type === 'vlan_connection') {
+      vlanParentHub[e.source] = e.target;
     }
   });
 
@@ -29,7 +40,6 @@ const computeLayout = (nodes, edges) => {
 
     const radius = Math.max(140, vms.length * 45);
     vms.forEach((vm, j) => {
-      // Spread VMs in a semicircle below the hub
       const angleStart = Math.PI * 0.15;
       const angleEnd = Math.PI * 0.85;
       const angle = vms.length === 1
@@ -42,15 +52,52 @@ const computeLayout = (nodes, edges) => {
     });
   });
 
-  // Physical node at top center
-  if (physNode) {
-    positions[physNode.id] = { x: 0, y: -250 };
+  // Position VLAN nodes between their parent hub and their VMs
+  vlanNodes.forEach((vlan, vi) => {
+    const parentHubId = vlanParentHub[vlan.id];
+    const parentPos = parentHubId && positions[parentHubId];
+    const vms = hubVMs[vlan.id] || [];
+
+    if (parentPos) {
+      // Place VLAN node offset from parent hub
+      const offsetX = 150 + vi * 80;
+      const vlanX = parentPos.x + offsetX;
+      const vlanY = parentPos.y + 100;
+      positions[vlan.id] = { x: vlanX, y: vlanY };
+
+      // Place VMs connected to this VLAN in semicircle below it
+      if (vms.length > 0) {
+        const radius = Math.max(100, vms.length * 40);
+        vms.forEach((vm, j) => {
+          const angleStart = Math.PI * 0.2;
+          const angleEnd = Math.PI * 0.8;
+          const angle = vms.length === 1
+            ? Math.PI * 0.5
+            : angleStart + (angleEnd - angleStart) * j / (vms.length - 1);
+          positions[vm.id] = {
+            x: vlanX + radius * Math.cos(angle),
+            y: vlanY + radius * Math.sin(angle)
+          };
+        });
+      }
+    } else {
+      positions[vlan.id] = { x: 300 + vi * 150, y: 100 };
+    }
+  });
+
+  // Physical nodes spread horizontally at top
+  if (physNodes.length > 0) {
+    const physSpacing = 300;
+    const physStartX = -(physNodes.length - 1) * physSpacing / 2;
+    physNodes.forEach((pn, i) => {
+      positions[pn.id] = { x: physStartX + i * physSpacing, y: -250 };
+    });
   }
 
   // Any unpositioned nodes
   nodes.forEach((n, i) => {
     if (!positions[n.id]) {
-      positions[n.id] = { x: -300 + i * 60, y: 300 };
+      positions[n.id] = { x: -300 + i * 60, y: 350 };
     }
   });
 
@@ -74,9 +121,9 @@ const TopologyView = ({ topologyData }) => {
         nodes: topologyData.nodes.map(node => ({
           data: { id: node.id, label: node.label, type: node.type, ...node }
         })),
-        edges: topologyData.edges.map(edge => ({
+        edges: topologyData.edges.map((edge, idx) => ({
           data: {
-            id: `${edge.source}-${edge.target}`,
+            id: `${edge.source}-${edge.target}-${edge.interface || edge.type || idx}`,
             source: edge.source,
             target: edge.target,
             type: edge.type,
@@ -139,6 +186,24 @@ const TopologyView = ({ topologyData }) => {
             'font-weight': 'bold',
             'text-outline-width': 2,
             'text-outline-color': '#EC4899',
+            'border-width': 0
+          }
+        },
+        // VLAN
+        {
+          selector: 'node[type="vlan"]',
+          style: {
+            'shape': 'diamond',
+            'background-color': '#06B6D4',
+            'width': '70px',
+            'height': '70px',
+            'color': '#fff',
+            'text-valign': 'center',
+            'text-margin-y': 0,
+            'font-size': '12px',
+            'font-weight': 'bold',
+            'text-outline-width': 2,
+            'text-outline-color': '#06B6D4',
             'border-width': 0
           }
         },
@@ -217,6 +282,15 @@ const TopologyView = ({ topologyData }) => {
           style: {
             'line-color': '#94A3B8',
             'width': 1.5
+          }
+        },
+        // VLAN connection
+        {
+          selector: 'edge[type="vlan_connection"]',
+          style: {
+            'line-color': '#06B6D4',
+            'width': 2.5,
+            'line-style': 'dashed'
           }
         },
         // Physical connection
@@ -328,8 +402,10 @@ const TopologyView = ({ topologyData }) => {
       }}>
         <LegendDot color="#10B981" label="Running VM" />
         <LegendDot color="#E5E7EB" label="Stopped VM" />
+        <LegendHex color="#F59E0B" label="LXC" />
         <LegendRect color="#6366F1" label="Bridge" />
         <LegendRect color="#EC4899" label="SDN VNet" />
+        <LegendDiamond color="#06B6D4" label="VLAN" />
         <LegendRect color="#3B82F6" label="Physical Node" />
       </div>
 
@@ -379,10 +455,15 @@ const TopologyView = ({ topologyData }) => {
               <DetailRow label="IP" value={selectedElement.ips.join(', ')} />
             )}
             {selectedElement.interface && <DetailRow label="Interface" value={selectedElement.interface} />}
+            {selectedElement.mac && <DetailRow label="MAC" value={selectedElement.mac} />}
             {selectedElement.vlan && <DetailRow label="VLAN" value={selectedElement.vlan} />}
+            {selectedElement.vlan_id && <DetailRow label="VLAN ID" value={selectedElement.vlan_id} />}
+            {selectedElement.parent_bridge && <DetailRow label="Parent Bridge" value={selectedElement.parent_bridge} />}
             {selectedElement.zone && <DetailRow label="Zone" value={selectedElement.zone} />}
+            {selectedElement.zone_type && <DetailRow label="Zone Type" value={selectedElement.zone_type} />}
             {selectedElement.cidr && <DetailRow label="CIDR" value={selectedElement.cidr} />}
             {selectedElement.gateway && <DetailRow label="Gateway" value={selectedElement.gateway} />}
+            {selectedElement.snat != null && <DetailRow label="SNAT" value={selectedElement.snat ? 'Enabled' : 'Disabled'} />}
           </div>
         </div>
       )}
@@ -407,6 +488,25 @@ const LegendDot = ({ color, label }) => (
 const LegendRect = ({ color, label }) => (
   <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
     <span style={{ display: 'inline-block', width: 14, height: 10, borderRadius: 3, background: color }} />
+    {label}
+  </span>
+);
+
+const LegendHex = ({ color, label }) => (
+  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+    <svg width="12" height="12" viewBox="0 0 12 12">
+      <polygon points="6,0 11,3 11,9 6,12 1,9 1,3" fill={color} />
+    </svg>
+    {label}
+  </span>
+);
+
+const LegendDiamond = ({ color, label }) => (
+  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+    <span style={{
+      display: 'inline-block', width: 10, height: 10,
+      background: color, transform: 'rotate(45deg)'
+    }} />
     {label}
   </span>
 );
