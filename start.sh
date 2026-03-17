@@ -33,13 +33,13 @@ echo "   Verify SSL: $VERIFY_SSL"
 echo ""
 
 # Docker起動確認
-if ! docker compose version &> /dev/null; then
+if ! command -v docker &> /dev/null; then
     echo "❌ Docker is not installed!"
     echo "Please install Docker first: https://docs.docker.com/get-docker/"
     exit 1
 fi
 
-if ! command -v docker compose &> /dev/null; then
+if ! command -v docker-compose &> /dev/null; then
     echo "❌ Docker Compose is not installed!"
     echo "Please install Docker Compose first: https://docs.docker.com/compose/install/"
     exit 1
@@ -50,11 +50,11 @@ echo ""
 
 # 既存のコンテナを停止
 echo "🛑 Stopping existing containers..."
-docker compose down
+docker-compose down
 
 # コンテナをビルド＆起動
 echo "🔨 Building and starting containers..."
-docker compose up -d --build
+docker-compose up -d --build
 
 # 起動を待つ
 echo "⏳ Waiting for services to start..."
@@ -62,10 +62,10 @@ sleep 10
 
 # ヘルスチェック
 echo "🏥 Checking backend health..."
-if curl -s http://localhost/api/health > /dev/null; then
+if curl -s http://localhost:5000/api/health > /dev/null; then
     echo "✅ Backend is healthy!"
 else
-    echo "⚠️  Backend might not be ready yet. Check logs with: docker compose logs backend"
+    echo "⚠️  Backend might not be ready yet. Check logs with: docker-compose logs backend"
 fi
 
 echo ""
@@ -74,11 +74,11 @@ echo "✅ Deployment complete!"
 echo "=========================================="
 echo ""
 echo "📊 Access the dashboard at: http://localhost"
-echo "🔧 API endpoint: http://localhost/api"
+echo "🔧 Backend API at: http://localhost:5000"
 echo ""
 echo "Useful commands:"
-echo "  View logs:     docker compose logs -f"
-echo "  Stop:          docker compose stop"
-echo "  Restart:       docker compose restart"
-echo "  Remove:        docker compose down"
+echo "  View logs:     docker-compose logs -f"
+echo "  Stop:          docker-compose stop"
+echo "  Restart:       docker-compose restart"
+echo "  Remove:        docker-compose down"
 echo ""

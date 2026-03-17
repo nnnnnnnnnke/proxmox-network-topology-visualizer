@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import TopologyView from './components/TopologyView';
 import './App.css';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_BASE_URL = '';
 
 function App() {
   const [topologyData, setTopologyData] = useState(null);
@@ -13,96 +13,96 @@ function App() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [refreshInterval, setRefreshInterval] = useState(30);
 
-  const fetchTopology = async () => {
+  // Filters
+  const [hideStoppedVMs, setHideStoppedVMs] = useState(true);
+  const [hideHostsEdges, setHideHostsEdges] = useState(true);
+  const [hidePhysicalNode, setHidePhysicalNode] = useState(true);
+
+  const fetchTopology = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      
-      // API_BASE_URLが/apiで終わっているので、/topologyのみ追加
-      const response = await axios.get(`${API_BASE_URL}/topology`);
+
+      const params = new URLSearchParams({
+        hide_stopped: hideStoppedVMs.toString(),
+        hide_hosts_edges: hideHostsEdges.toString(),
+        hide_physical_node: hidePhysicalNode.toString()
+      });
+
+      const response = await axios.get(`${API_BASE_URL}/api/topology?${params}`);
       setTopologyData(response.data);
       setSummary(response.data.summary);
-      
     } catch (err) {
       console.error('Failed to fetch topology:', err);
       setError(err.response?.data?.error || err.message || 'Failed to fetch topology data');
     } finally {
       setLoading(false);
     }
-  };
+  }, [hideStoppedVMs, hideHostsEdges, hidePhysicalNode]);
 
-  useEffect(() => {
-    fetchTopology();
-  }, []);
+  // Refetch on filter change
+  useEffect(() => { fetchTopology(); }, [fetchTopology]);
 
+  // Auto-refresh
   useEffect(() => {
-    let intervalId;
-    
-    if (autoRefresh) {
-      intervalId = setInterval(() => {
-        fetchTopology();
-      }, refreshInterval * 1000);
-    }
-    
-    return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-    };
-  }, [autoRefresh, refreshInterval]);
+    if (!autoRefresh) return;
+    const id = setInterval(fetchTopology, refreshInterval * 1000);
+    return () => clearInterval(id);
+  }, [autoRefresh, refreshInterval, fetchTopology]);
 
   return (
     <div className="App">
       <header className="App-header">
-        <div className="header-content">
-          <h1>Proxmox Network Topology Visualizer</h1>
-          
+        <div className="header-top">
+          <h1>Proxmox Topology</h1>
           {summary && (
-            <div className="summary">
-              <span className="summary-item">
-                <strong>Nodes:</strong> {summary.total_nodes}
-              </span>
-              <span className="summary-item">
-                <strong>VMs:</strong> {summary.total_vms}
-              </span>
-              <span className="summary-item">
-                <strong>Networks:</strong> {summary.total_networks}
-              </span>
-              {summary.total_sdn > 0 && (
-                <span className="summary-item">
-                  <strong>SDN:</strong> {summary.total_sdn}
-                </span>
-              )}
+            <div className="summary-badges">
+              <span className="badge badge-running">{summary.running_vms} running</span>
+              <span className="badge badge-stopped">{summary.stopped_vms} stopped</span>
+              <span className="badge badge-network">{summary.total_networks + summary.total_sdn} networks</span>
             </div>
           )}
         </div>
-        
-        <div className="controls">
-          <button onClick={fetchTopology} disabled={loading}>
-            {loading ? 'Loading...' : 'Refresh'}
-          </button>
-          
-          <label className="auto-refresh-control">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-            />
-            Auto-refresh
-          </label>
-          
-          {autoRefresh && (
-            <select
-              value={refreshInterval}
-              onChange={(e) => setRefreshInterval(Number(e.target.value))}
-              className="refresh-interval"
-            >
-              <option value={10}>10s</option>
-              <option value={30}>30s</option>
-              <option value={60}>1m</option>
-              <option value={300}>5m</option>
-            </select>
-          )}
+
+        <div className="header-controls">
+          <div className="filter-group">
+            <label className="toggle-control">
+              <input type="checkbox" checked={hideStoppedVMs}
+                onChange={(e) => setHideStoppedVMs(e.target.checked)} />
+              <span>Hide stopped</span>
+            </label>
+            <label className="toggle-control">
+              <input type="checkbox" checked={hideHostsEdges}
+                onChange={(e) => setHideHostsEdges(e.target.checked)} />
+              <span>Hide host edges</span>
+            </label>
+            <label className="toggle-control">
+              <input type="checkbox" checked={hidePhysicalNode}
+                onChange={(e) => setHidePhysicalNode(e.target.checked)} />
+              <span>Hide physical node</span>
+            </label>
+          </div>
+
+          <div className="action-group">
+            <button onClick={fetchTopology} disabled={loading} className="btn-refresh">
+              {loading ? 'Loading...' : 'Refresh'}
+            </button>
+            <label className="toggle-control">
+              <input type="checkbox" checked={autoRefresh}
+                onChange={(e) => setAutoRefresh(e.target.checked)} />
+              <span>Auto</span>
+            </label>
+            {autoRefresh && (
+              <select value={refreshInterval}
+                onChange={(e) => setRefreshInterval(Number(e.target.value))}
+                className="refresh-interval">
+                <option value={10}>10s</option>
+                <option value={30}>30s</option>
+                <option value={60}>1m</option>
+                <option value={300}>5m</option>
+              </select>
+            )}
+          </div>
         </div>
       </header>
 
@@ -113,7 +113,7 @@ function App() {
             <p>Loading topology data...</p>
           </div>
         )}
-        
+
         {error && (
           <div className="error-container">
             <h2>Error</h2>
@@ -121,43 +121,11 @@ function App() {
             <button onClick={fetchTopology}>Retry</button>
           </div>
         )}
-        
+
         {!loading && !error && topologyData && (
           <TopologyView topologyData={topologyData} />
         )}
       </main>
-      
-      <footer className="App-footer">
-        <div className="legend">
-          <h4>Legend</h4>
-          <div className="legend-items">
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#4A90E2' }}></span>
-              Physical Node
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#7ED321' }}></span>
-              VM
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#F5A623' }}></span>
-              Container
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#BD10E0' }}></span>
-              Bridge
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#50E3C2' }}></span>
-              VLAN
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#FF6B6B' }}></span>
-              SDN VNET
-            </div>
-          </div>
-        </div>
-      </footer>
     </div>
   );
 }

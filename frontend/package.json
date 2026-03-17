@@ -1,5 +1,5 @@
 {
-  "name": "proxmox-network-topology-visualizer",
+  "name": "proxmox-topology-frontend",
   "version": "1.0.0",
   "private": true,
   "dependencies": {

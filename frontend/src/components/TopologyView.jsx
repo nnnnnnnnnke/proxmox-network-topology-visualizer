@@ -1,9 +1,61 @@
 import React, { useEffect, useRef, useState } from 'react';
 import cytoscape from 'cytoscape';
-import cola from 'cytoscape-cola';
 
-// colaレイアウトを登録
-cytoscape.use(cola);
+const computeLayout = (nodes, edges) => {
+  const hubs = nodes.filter(n => n.type === 'bridge' || n.type === 'sdn_vnet');
+  const physNode = nodes.find(n => n.type === 'physical_node');
+
+  // Group VMs by their connected hub
+  const hubVMs = {};
+  hubs.forEach(h => { hubVMs[h.id] = []; });
+  edges.forEach(e => {
+    if (e.type === 'network_connection' && hubVMs[e.target]) {
+      const vm = nodes.find(n => n.id === e.source);
+      if (vm) hubVMs[e.target].push(vm);
+    }
+  });
+
+  const positions = {};
+  const hubSpacing = 350;
+  const startX = -(hubs.length - 1) * hubSpacing / 2;
+
+  hubs.forEach((hub, i) => {
+    const cx = startX + i * hubSpacing;
+    const cy = 0;
+    positions[hub.id] = { x: cx, y: cy };
+
+    const vms = hubVMs[hub.id] || [];
+    if (vms.length === 0) return;
+
+    const radius = Math.max(140, vms.length * 45);
+    vms.forEach((vm, j) => {
+      // Spread VMs in a semicircle below the hub
+      const angleStart = Math.PI * 0.15;
+      const angleEnd = Math.PI * 0.85;
+      const angle = vms.length === 1
+        ? Math.PI * 0.5
+        : angleStart + (angleEnd - angleStart) * j / (vms.length - 1);
+      positions[vm.id] = {
+        x: cx + radius * Math.cos(angle),
+        y: cy + radius * Math.sin(angle)
+      };
+    });
+  });
+
+  // Physical node at top center
+  if (physNode) {
+    positions[physNode.id] = { x: 0, y: -250 };
+  }
+
+  // Any unpositioned nodes
+  nodes.forEach((n, i) => {
+    if (!positions[n.id]) {
+      positions[n.id] = { x: -300 + i * 60, y: 300 };
+    }
+  });
+
+  return positions;
+};
 
 const TopologyView = ({ topologyData }) => {
   const cyRef = useRef(null);
@@ -13,385 +65,350 @@ const TopologyView = ({ topologyData }) => {
   useEffect(() => {
     if (!topologyData || !containerRef.current) return;
 
-    // Cytoscapeインスタンスを初期化
+    const positions = computeLayout(topologyData.nodes, topologyData.edges);
+
     const cy = cytoscape({
       container: containerRef.current,
 
       elements: {
         nodes: topologyData.nodes.map(node => ({
-          data: {
-            id: node.id,
-            label: node.label,
-            type: node.type,
-            ...node
-          }
+          data: { id: node.id, label: node.label, type: node.type, ...node }
         })),
         edges: topologyData.edges.map(edge => ({
           data: {
             id: `${edge.source}-${edge.target}`,
             source: edge.source,
             target: edge.target,
-            label: edge.label || edge.type,
+            type: edge.type,
             ...edge
           }
         }))
       },
 
       style: [
-        // 基本スタイル
+        // Base node
         {
           selector: 'node',
           style: {
             'label': 'data(label)',
-            'text-valign': 'center',
+            'text-valign': 'bottom',
             'text-halign': 'center',
-            'font-size': '12px',
-            'width': '80px',
-            'height': '80px',
+            'text-margin-y': 8,
+            'font-size': '11px',
+            'font-family': '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+            'width': '50px',
+            'height': '50px',
             'border-width': '2px',
-            'border-color': '#666',
-            'background-color': '#fff'
+            'border-color': '#ddd',
+            'background-color': '#fff',
+            'text-max-width': '100px',
+            'text-wrap': 'ellipsis',
+            'color': '#374151'
           }
         },
-
-        // 物理ノード（Proxmoxサーバー）
+        // Bridge
         {
-          selector: 'node[type="physical_node"]',
+          selector: 'node[type="bridge"]',
           style: {
             'shape': 'round-rectangle',
-            'background-color': '#4A90E2',
-            'width': '120px',
-            'height': '100px',
-            'font-weight': 'bold',
+            'background-color': '#6366F1',
+            'width': '100px',
+            'height': '55px',
             'color': '#fff',
+            'text-valign': 'center',
+            'text-margin-y': 0,
+            'font-size': '14px',
+            'font-weight': 'bold',
             'text-outline-width': 2,
-            'text-outline-color': '#4A90E2'
+            'text-outline-color': '#6366F1',
+            'border-width': 0
           }
         },
-
-        // VM
+        // SDN VNet
         {
-          selector: 'node[type="vm"]',
+          selector: 'node[type="sdn_vnet"]',
+          style: {
+            'shape': 'round-rectangle',
+            'background-color': '#EC4899',
+            'width': '100px',
+            'height': '55px',
+            'color': '#fff',
+            'text-valign': 'center',
+            'text-margin-y': 0,
+            'font-size': '14px',
+            'font-weight': 'bold',
+            'text-outline-width': 2,
+            'text-outline-color': '#EC4899',
+            'border-width': 0
+          }
+        },
+        // Running VM
+        {
+          selector: 'node[type="vm"][status="running"]',
           style: {
             'shape': 'ellipse',
-            'background-color': '#7ED321',
-            'width': '80px',
-            'height': '80px'
+            'background-color': '#10B981',
+            'border-color': '#059669',
+            'border-width': '2px',
+            'width': '55px',
+            'height': '55px',
+            'color': '#1F2937',
+            'font-weight': '500'
           }
         },
-
-        // コンテナ
+        // Stopped VM
+        {
+          selector: 'node[type="vm"][status="stopped"]',
+          style: {
+            'shape': 'ellipse',
+            'background-color': '#E5E7EB',
+            'border-color': '#D1D5DB',
+            'border-width': '1px',
+            'width': '40px',
+            'height': '40px',
+            'color': '#9CA3AF',
+            'font-size': '9px',
+            'opacity': 0.6
+          }
+        },
+        // Container
         {
           selector: 'node[type="container"]',
           style: {
             'shape': 'hexagon',
-            'background-color': '#F5A623',
-            'width': '80px',
-            'height': '80px'
+            'background-color': '#F59E0B',
+            'border-color': '#D97706',
+            'border-width': '2px',
+            'width': '55px',
+            'height': '55px'
           }
         },
-
-        // ブリッジネットワーク
+        // Physical node
         {
-          selector: 'node[type="bridge"]',
+          selector: 'node[type="physical_node"]',
           style: {
-            'shape': 'diamond',
-            'background-color': '#BD10E0',
-            'width': '100px',
-            'height': '100px'
+            'shape': 'round-rectangle',
+            'background-color': '#3B82F6',
+            'width': '120px',
+            'height': '50px',
+            'font-weight': 'bold',
+            'color': '#fff',
+            'text-valign': 'center',
+            'text-margin-y': 0,
+            'text-outline-width': 2,
+            'text-outline-color': '#3B82F6',
+            'border-width': 0
           }
         },
-
-        // VLAN
-        {
-          selector: 'node[type="vlan"]',
-          style: {
-            'shape': 'triangle',
-            'background-color': '#50E3C2',
-            'width': '90px',
-            'height': '90px'
-          }
-        },
-
-        // SDN VNET
-        {
-          selector: 'node[type="sdn_vnet"]',
-          style: {
-            'shape': 'star',
-            'background-color': '#FF6B6B',
-            'width': '100px',
-            'height': '100px'
-          }
-        },
-
-        // エッジ（接続線）
+        // Edge base
         {
           selector: 'edge',
           style: {
-            'width': 3,
-            'line-color': '#999',
-            'target-arrow-color': '#999',
-            'target-arrow-shape': 'triangle',
+            'width': 1.5,
+            'line-color': '#CBD5E1',
             'curve-style': 'bezier',
-            'label': 'data(label)',
-            'font-size': '10px',
-            'text-rotation': 'autorotate',
-            'text-margin-y': -10
+            'target-arrow-shape': 'none',
+            'opacity': 0.6
           }
         },
-
-        // 物理接続
-        {
-          selector: 'edge[type="physical_connection"]',
-          style: {
-            'line-color': '#4A90E2',
-            'width': 4,
-            'line-style': 'solid'
-          }
-        },
-
-        // ネットワーク接続
+        // Network connection
         {
           selector: 'edge[type="network_connection"]',
           style: {
-            'line-color': '#7ED321',
-            'width': 2
+            'line-color': '#94A3B8',
+            'width': 1.5
           }
         },
-
-        // VLAN接続
+        // Physical connection
         {
-          selector: 'edge[vlan]',
+          selector: 'edge[type="physical_connection"]',
           style: {
-            'line-color': '#50E3C2',
-            'line-style': 'dashed',
-            'width': 2
+            'line-color': '#3B82F6',
+            'width': 3
           }
         },
-
-        // ホスト関係
+        // Hosts edge
         {
           selector: 'edge[type="hosts"]',
           style: {
-            'line-color': '#ccc',
-            'width': 2,
+            'line-color': '#E2E8F0',
+            'width': 1,
             'line-style': 'dotted',
-            'target-arrow-shape': 'none'
+            'opacity': 0.4
           }
         },
-
-        // 非ハイライト時（薄く表示）
-        {
-          selector: '.faded',
-          style: {
-            'opacity': 0.15
-          }
-        },
-
-        // ハイライトされたノード
-        {
-          selector: 'node.highlighted',
-          style: {
-            'border-width': '4px',
-            'border-color': '#FF6B00',
-            'opacity': 1
-          }
-        },
-
-        // ハイライトされたエッジ
-        {
-          selector: 'edge.highlighted',
-          style: {
-            'width': 5,
-            'line-color': '#FF6B00',
-            'target-arrow-color': '#FF6B00',
-            'opacity': 1,
-            'z-index': 10
-          }
-        },
-
-        // 選択状態
+        // Selected
         {
           selector: ':selected',
           style: {
-            'border-width': '4px',
-            'border-color': '#ff0000',
-            'background-color': '#ffcccc'
+            'border-width': '3px',
+            'border-color': '#F59E0B',
+            'overlay-color': '#F59E0B',
+            'overlay-padding': 6,
+            'overlay-opacity': 0.1
+          }
+        },
+        // Highlight classes
+        {
+          selector: '.highlighted',
+          style: {
+            'opacity': 1,
+            'border-width': '3px',
+            'border-color': '#F59E0B'
+          }
+        },
+        {
+          selector: '.dimmed',
+          style: { 'opacity': 0.12 }
+        },
+        {
+          selector: 'edge.highlighted',
+          style: {
+            'opacity': 1,
+            'width': 3,
+            'line-color': '#F59E0B'
           }
         }
       ],
 
       layout: {
-        name: 'cola',
-        animate: true,
-        randomize: false,
-        maxSimulationTime: 8000,
+        name: 'preset',
+        positions: (node) => positions[node.id()] || { x: 0, y: 0 },
         fit: true,
-        padding: 50,
-        nodeSpacing: 40,
-        edgeLengthVal: 150,
-        edgeLength: function(edge) {
-          // ブリッジ↔物理ノード間は短く、VM↔ブリッジはやや長く、hosts は長め
-          var type = edge.data('type');
-          if (type === 'physical_connection') return 120;
-          if (type === 'network_connection') return 180;
-          return 250; // hosts
-        },
-        convergenceThreshold: 0.01,
-        componentSpacing: 100,
-        ungrabifyWhileSimulating: false,
-        avoidOverlap: true
+        padding: 80
       },
 
-      wheelSensitivity: 0.2,
-      minZoom: 0.1,
+      minZoom: 0.3,
       maxZoom: 3
     });
 
-    // ハイライトをリセットするヘルパー
-    function clearHighlights() {
-      cy.elements().removeClass('highlighted faded');
-    }
-
-    // ノードクリック: 関連エッジと隣接ノードをハイライト
+    // Click: highlight neighbors
     cy.on('tap', 'node', (event) => {
       const node = event.target;
       setSelectedElement(node.data());
-
-      clearHighlights();
-      cy.elements().addClass('faded');
-      node.removeClass('faded').addClass('highlighted');
-      node.connectedEdges().removeClass('faded').addClass('highlighted');
-      node.neighborhood('node').removeClass('faded').addClass('highlighted');
+      cy.elements().addClass('dimmed');
+      node.removeClass('dimmed').addClass('highlighted');
+      node.connectedEdges().removeClass('dimmed').addClass('highlighted');
+      node.neighborhood().nodes().removeClass('dimmed').addClass('highlighted');
     });
 
-    // エッジクリック: そのエッジと両端ノードをハイライト
     cy.on('tap', 'edge', (event) => {
       const edge = event.target;
       setSelectedElement(edge.data());
-
-      clearHighlights();
-      cy.elements().addClass('faded');
-      edge.removeClass('faded').addClass('highlighted');
-      edge.source().removeClass('faded').addClass('highlighted');
-      edge.target().removeClass('faded').addClass('highlighted');
+      cy.elements().addClass('dimmed');
+      edge.removeClass('dimmed').addClass('highlighted');
+      edge.source().removeClass('dimmed').addClass('highlighted');
+      edge.target().removeClass('dimmed').addClass('highlighted');
     });
 
-    // 背景クリックで選択・ハイライト解除
     cy.on('tap', (event) => {
       if (event.target === cy) {
         setSelectedElement(null);
-        clearHighlights();
-        cy.$(':selected').unselect();
+        cy.elements().removeClass('dimmed highlighted');
       }
     });
 
     cyRef.current = cy;
-
-    // クリーンアップ
-    return () => {
-      if (cyRef.current) {
-        cyRef.current.destroy();
-      }
-    };
+    return () => { if (cyRef.current) cyRef.current.destroy(); };
   }, [topologyData]);
 
   return (
-    <div style={{ display: 'flex', height: '100vh', width: '100%' }}>
+    <div style={{ position: 'relative', height: '100%', width: '100%' }}>
       <div
         ref={containerRef}
-        style={{
-          flex: 1,
-          backgroundColor: '#f5f5f5',
-          border: '1px solid #ddd'
-        }}
+        style={{ width: '100%', height: '100%', backgroundColor: '#F8FAFC' }}
       />
 
+      {/* Inline legend */}
+      <div style={{
+        position: 'absolute', bottom: 16, left: 16,
+        background: 'rgba(255,255,255,0.92)', borderRadius: 10,
+        padding: '10px 16px', fontSize: 12, boxShadow: '0 2px 12px rgba(0,0,0,0.08)',
+        display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap'
+      }}>
+        <LegendDot color="#10B981" label="Running VM" />
+        <LegendDot color="#E5E7EB" label="Stopped VM" />
+        <LegendRect color="#6366F1" label="Bridge" />
+        <LegendRect color="#EC4899" label="SDN VNet" />
+        <LegendRect color="#3B82F6" label="Physical Node" />
+      </div>
+
+      {/* Detail panel */}
       {selectedElement && (
         <div style={{
-          width: '350px',
-          padding: '20px',
-          backgroundColor: '#fff',
-          borderLeft: '1px solid #ddd',
-          overflowY: 'auto'
+          position: 'absolute', top: 16, right: 16, width: 300,
+          maxHeight: 'calc(100% - 32px)',
+          padding: '20px', backgroundColor: 'rgba(255,255,255,0.95)',
+          borderRadius: 12, boxShadow: '0 4px 24px rgba(0,0,0,0.12)',
+          overflowY: 'auto', backdropFilter: 'blur(8px)'
         }}>
-          <h3 style={{ marginTop: 0, borderBottom: '2px solid #4A90E2', paddingBottom: '10px' }}>
+          <button
+            onClick={() => {
+              setSelectedElement(null);
+              cyRef.current?.elements().removeClass('dimmed highlighted');
+            }}
+            style={{
+              position: 'absolute', top: 8, right: 12, border: 'none',
+              background: 'none', fontSize: 18, cursor: 'pointer', color: '#9CA3AF'
+            }}
+          >
+            &times;
+          </button>
+
+          <h3 style={{ margin: '0 0 12px', fontSize: 16, color: '#1F2937' }}>
             {selectedElement.label || selectedElement.id}
           </h3>
 
-          <div style={{ fontSize: '14px' }}>
-            <p><strong>Type:</strong> {selectedElement.type}</p>
-
+          <div style={{ fontSize: 14, lineHeight: 1.8 }}>
+            <DetailRow label="Type" value={selectedElement.type} />
             {selectedElement.status && (
-              <p><strong>Status:</strong>
+              <DetailRow label="Status" value={
                 <span style={{
-                  color: selectedElement.status === 'running' || selectedElement.status === 'online' ? 'green' : 'red',
-                  marginLeft: '5px'
+                  color: selectedElement.status === 'running' ? '#10B981' : '#EF4444',
+                  fontWeight: 600
                 }}>
                   {selectedElement.status}
                 </span>
-              </p>
+              } />
             )}
-
-            {selectedElement.vmid && (
-              <p><strong>VM ID:</strong> {selectedElement.vmid}</p>
-            )}
-
-            {selectedElement.node && (
-              <p><strong>Host Node:</strong> {selectedElement.node}</p>
-            )}
-
-            {selectedElement.cpu && (
-              <p><strong>CPU:</strong> {selectedElement.cpu}</p>
-            )}
-
-            {selectedElement.mem && (
-              <p><strong>Memory:</strong> {(selectedElement.mem / 1024 / 1024 / 1024).toFixed(2)} GB</p>
-            )}
-
-            {selectedElement.vlan && (
-              <p><strong>VLAN:</strong> {selectedElement.vlan}</p>
-            )}
-
-            {selectedElement.vlan_id && (
-              <p><strong>VLAN ID:</strong> {selectedElement.vlan_id}</p>
-            )}
-
-            {selectedElement.cidr && (
-              <p><strong>CIDR:</strong> {selectedElement.cidr}</p>
-            )}
-
-            {selectedElement.gateway && (
-              <p><strong>Gateway:</strong> {selectedElement.gateway}</p>
-            )}
-
+            {selectedElement.vmid != null && <DetailRow label="VMID" value={selectedElement.vmid} />}
+            {selectedElement.node && <DetailRow label="Host" value={selectedElement.node} />}
+            {selectedElement.cpu > 0 && <DetailRow label="CPU" value={`${selectedElement.cpu} cores`} />}
+            {selectedElement.mem > 0 && <DetailRow label="Memory" value={`${(selectedElement.mem / 1024 / 1024 / 1024).toFixed(1)} GB`} />}
             {selectedElement.ips && selectedElement.ips.length > 0 && (
-              <div>
-                <p><strong>IP Addresses:</strong></p>
-                <ul style={{ marginTop: '5px', paddingLeft: '20px' }}>
-                  {selectedElement.ips.map((ip, idx) => (
-                    <li key={idx}>{ip}</li>
-                  ))}
-                </ul>
-              </div>
+              <DetailRow label="IP" value={selectedElement.ips.join(', ')} />
             )}
-
-            {selectedElement.mac && (
-              <p><strong>MAC:</strong> {selectedElement.mac}</p>
-            )}
-
-            {selectedElement.interface && (
-              <p><strong>Interface:</strong> {selectedElement.interface}</p>
-            )}
-
-            {selectedElement.bridge_vlan_aware && (
-              <p><strong>VLAN Aware:</strong> {selectedElement.bridge_vlan_aware ? 'Yes' : 'No'}</p>
-            )}
+            {selectedElement.interface && <DetailRow label="Interface" value={selectedElement.interface} />}
+            {selectedElement.vlan && <DetailRow label="VLAN" value={selectedElement.vlan} />}
+            {selectedElement.zone && <DetailRow label="Zone" value={selectedElement.zone} />}
+            {selectedElement.cidr && <DetailRow label="CIDR" value={selectedElement.cidr} />}
+            {selectedElement.gateway && <DetailRow label="Gateway" value={selectedElement.gateway} />}
           </div>
         </div>
       )}
     </div>
   );
 };
+
+const DetailRow = ({ label, value }) => (
+  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+    <span style={{ color: '#6B7280', fontWeight: 500 }}>{label}</span>
+    <span style={{ color: '#1F2937' }}>{value}</span>
+  </div>
+);
+
+const LegendDot = ({ color, label }) => (
+  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+    <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: color }} />
+    {label}
+  </span>
+);
+
+const LegendRect = ({ color, label }) => (
+  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+    <span style={{ display: 'inline-block', width: 14, height: 10, borderRadius: 3, background: color }} />
+    {label}
+  </span>
+);
 
 export default TopologyView;

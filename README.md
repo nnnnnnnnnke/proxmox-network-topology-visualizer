@@ -1,8 +1,8 @@
 # Proxmox Network Topology Visualizer
 
-A web-based dashboard that visualizes the network topology of a Proxmox VE cluster. It runs on your local PC (e.g. Mac) via Docker Compose and connects to a remote Proxmox VE server through the API to display physical nodes, VMs, networks, VLANs, and IP address ranges interactively.
+A web-based dashboard that visualizes the network topology of a Proxmox VE cluster. It runs via Docker Compose and connects to a remote Proxmox VE server through the API to display physical nodes, VMs, networks, VLANs, and IP address ranges interactively.
 
-![Topology Overview](docs/images/topology-overview.png)
+\![Topology Overview](docs/images/topology-overview.png)
 
 ## Architecture
 
@@ -31,8 +31,11 @@ A web-based dashboard that visualizes the network topology of a Proxmox VE clust
 ## Features
 
 - **Real-time topology visualization** of the entire Proxmox cluster
-- **Interactive graph** — click nodes and edges to view detailed information
+- **Interactive graph** — click nodes and edges to view detailed information with neighbor highlighting
+- **Display filters** — toggle visibility of stopped VMs, host edges, and physical nodes
+- **Custom layout** — bridges and SDN VNets arranged horizontally with VMs in semicircles below
 - **Auto-refresh** at configurable intervals (10s, 30s, 1m, 5m)
+- **Detail panel** — click any node/edge to see properties (VMID, IP, CPU, memory, VLAN, etc.)
 - **Supported resources:**
   - Physical nodes (Proxmox servers)
   - Virtual machines (QEMU)
@@ -45,9 +48,9 @@ A web-based dashboard that visualizes the network topology of a Proxmox VE clust
 ## Prerequisites
 
 - Proxmox VE 7.0+
-- Docker & Docker Compose (on your local PC)
+- Docker & Docker Compose
 - Proxmox API token
-- Network access from your local PC to the Proxmox server on port 8006
+- Network access to the Proxmox server on port 8006
 
 ## Quick Start
 
@@ -78,7 +81,7 @@ cp .env.example .env
 Edit `.env` with your Proxmox server details:
 ```bash
 PROXMOX_HOST=https://192.168.1.100:8006
-PROXMOX_TOKEN_ID=root@pam!topology
+PROXMOX_TOKEN_ID=root@pam\!topology
 PROXMOX_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 VERIFY_SSL=false
 ```
@@ -96,6 +99,18 @@ Open your browser:
 http://localhost
 ```
 
+## Display Filters
+
+The header bar provides toggles to control what is shown on the graph:
+
+| Filter | Default | Description |
+|---|---|---|
+| **Hide stopped** | ON | Hide VMs/containers that are not running |
+| **Hide host edges** | ON | Hide dotted lines connecting physical nodes to their VMs |
+| **Hide physical node** | ON | Hide the physical Proxmox server node |
+
+These filters are applied server-side via query parameters on the `/api/topology` endpoint.
+
 ## API Endpoints
 
 Accessible via Nginx at `http://localhost/api/*`:
@@ -103,23 +118,22 @@ Accessible via Nginx at `http://localhost/api/*`:
 | Endpoint | Description |
 |---|---|
 | `GET /api/health` | Health check |
-| `GET /api/topology` | Full topology data |
+| `GET /api/topology?hide_stopped=true&hide_hosts_edges=true&hide_physical_node=true` | Full topology data (with filters) |
 | `GET /api/nodes` | List of nodes |
 | `GET /api/nodes/<node>/network` | Node network configuration |
 | `GET /api/nodes/<node>/vms` | VMs and containers on a node |
-| `GET /api/cluster/status` | Cluster status |
 | `GET /api/config` | Current configuration |
 
 ## Graph Legend
 
 | Color | Shape | Resource Type |
 |---|---|---|
-| Blue | Square | Physical node (Proxmox server) |
-| Green | Circle | Virtual machine (QEMU VM) |
-| Orange | Hexagon | LXC container |
-| Purple | Diamond | Network bridge |
-| Cyan | Triangle | VLAN |
-| Red | Star | SDN VNET |
+| 🟢 Green | Circle | Running VM (QEMU) |
+| ⚪ Gray | Circle | Stopped VM |
+| 🟠 Orange | Hexagon | LXC container |
+| 🟣 Indigo | Rounded rectangle | Network bridge |
+| 🩷 Pink | Rounded rectangle | SDN VNET |
+| 🔵 Blue | Rounded rectangle | Physical node |
 
 ## Troubleshooting
 
@@ -130,11 +144,6 @@ curl -sk https://<PROXMOX_HOST>:8006/api2/json/version \
   -H "Authorization: PVEAPIToken=<TOKEN_ID>=<TOKEN_SECRET>"
 ```
 
-If the connection fails:
-- Check that port 8006 is allowed in the Proxmox server firewall
-- Verify VPN/Tailscale route is active
-- Check API token permissions
-
 ### View container logs
 
 ```bash
@@ -144,11 +153,9 @@ docker compose logs frontend
 
 ### SSL certificate errors
 
-If using a self-signed certificate, set `VERIFY_SSL=false` in `.env`.
+Set `VERIFY_SSL=false` in `.env` when using a self-signed certificate.
 
 ## Development
-
-### Local development (without Docker)
 
 ```bash
 # Backend
@@ -173,68 +180,23 @@ npm start
 # Proxmox Network Topology Visualizer (日本語)
 
 Proxmoxクラスタのネットワークトポロジを可視化するWebベースのダッシュボードです。
-手元のPC（Mac等）からリモートのProxmox VEサーバーにAPI経由で接続し、物理ノード、仮想マシン、ネットワーク、VLAN、IPアドレス帯を視覚的に表示します。
+Docker Composeで起動し、リモートのProxmox VEサーバーにAPI経由で接続して、物理ノード、仮想マシン、ネットワーク、VLAN、IPアドレス帯を視覚的に表示します。
 
-![トポロジ表示イメージ](docs/images/topology-overview.png)
-
-## 構成概要
-
-```
-┌──────────────────────┐          ┌─────────────────────┐
-│  手元のPC (Mac等)     │          │  Proxmox VE Server  │
-│                      │          │                     │
-│  ┌────────────────┐  │  HTTPS   │  ┌───────────────┐  │
-│  │ Frontend       │  │          │  │ Proxmox API   │  │
-│  │ (Nginx:80)     │  │          │  │ (Port 8006)   │  │
-│  └───────┬────────┘  │          │  └───────────────┘  │
-│          │ /api/*    │          │                     │
-│  ┌───────▼────────┐  │          │                     │
-│  │ Backend        │──┼──────────┤                     │
-│  │ (Flask:5000)   │  │ API Token│                     │
-│  └────────────────┘  │          │                     │
-│                      │          │                     │
-│  (Docker Compose)    │          │                     │
-└──────────────────────┘          └─────────────────────┘
-```
-
-- **Frontend（Nginx）** がポート80でWebUIを提供し、`/api/*` へのリクエストをBackendにプロキシ
-- **Backend（Flask）** がProxmox VE APIにトークン認証で接続しトポロジデータを取得
-- バックエンドはDockerネットワーク内部のみで動作し、外部にポートを公開しない
+\![トポロジ表示イメージ](docs/images/topology-overview.png)
 
 ## 機能
 
 - **リアルタイムトポロジ表示**: Proxmoxクラスタ全体のネットワーク構成を視覚化
-- **インタラクティブなグラフ**: ノードやエッジをクリックして詳細情報を表示
-- **自動更新**: 指定した間隔（10秒〜5分）で自動的にデータを更新
-- **対応リソース**:
-  - 物理ノード（Proxmoxサーバー）
-  - 仮想マシン（QEMU）
-  - コンテナ（LXC）
-  - ネットワークブリッジ
-  - VLAN設定
-  - IPアドレス情報
-  - SDN VNET
-
-## 前提条件
-
-- Proxmox VE 7.0以上
-- Docker & Docker Compose（手元のPC側）
-- Proxmox APIトークン
-- 手元のPCからProxmoxサーバーのポート8006にアクセス可能であること
+- **インタラクティブなグラフ**: ノードやエッジをクリックして詳細情報を表示（隣接ノードのハイライト付き）
+- **表示フィルタ**: 停止中のVM、ホストエッジ、物理ノードの表示/非表示を切替可能
+- **カスタムレイアウト**: ブリッジ・SDN VNetを水平配置し、VMを扇状に配置
+- **自動更新**: 10秒〜5分の間隔で自動更新
+- **詳細パネル**: ノードクリックでVMID、IP、CPU、メモリ、VLANなどの詳細を表示
 
 ## セットアップ
 
 ### 1. Proxmox APIトークンの作成
 
-Proxmox WebUIで以下の手順でAPIトークンを作成します：
-
-1. Datacenter → Permissions → API Tokens
-2. "Add"をクリック
-3. ユーザーとトークンIDを入力
-4. "Privilege Separation"のチェックを外す（必要に応じて）
-5. 生成されたトークンシークレットを保存
-
-CLI経由の場合：
 ```bash
 pveum user token add user@pam tokenname --privsep=0
 ```
@@ -246,14 +208,7 @@ git clone https://github.com/nnnnnnnnnke/proxmox-network-topology-visualizer.git
 cd proxmox-network-topology-visualizer
 
 cp .env.example .env
-```
-
-`.env` を編集してProxmoxサーバーの情報を設定：
-```bash
-PROXMOX_HOST=https://192.168.1.100:8006
-PROXMOX_TOKEN_ID=root@pam!topology
-PROXMOX_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-VERIFY_SSL=false
+# .env を編集してProxmoxサーバーの情報を設定
 ```
 
 ### 3. 起動
@@ -262,37 +217,17 @@ VERIFY_SSL=false
 docker compose up -d
 ```
 
-### 4. アクセス
+ブラウザで `http://localhost` にアクセス。
 
-ブラウザで手元のPCから：
-```
-http://localhost
-```
+## 表示フィルタ
 
-## トラブルシューティング
+ヘッダーバーのトグルで表示内容を制御できます：
 
-### Proxmox APIに接続できない
-
-```bash
-curl -sk https://<PROXMOX_HOST>:8006/api2/json/version \
-  -H "Authorization: PVEAPIToken=<TOKEN_ID>=<TOKEN_SECRET>"
-```
-
-接続できない場合：
-- Proxmoxサーバーのファイアウォールでポート8006が許可されているか確認
-- VPN/Tailscale等の経路が有効か確認
-- APIトークンの権限を確認
-
-### コンテナのログを確認
-
-```bash
-docker compose logs backend
-docker compose logs frontend
-```
-
-### SSL証明書エラー
-
-自己署名証明書を使用している場合は `.env` で `VERIFY_SSL=false` を設定してください。
+| フィルタ | デフォルト | 説明 |
+|---|---|---|
+| **Hide stopped** | ON | 停止中のVM/コンテナを非表示 |
+| **Hide host edges** | ON | 物理ノードとVMを結ぶ点線を非表示 |
+| **Hide physical node** | ON | 物理Proxmoxサーバーノードを非表示 |
 
 ## ライセンス
 

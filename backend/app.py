@@ -5,7 +5,6 @@ import logging
 from proxmox_client import ProxmoxClient
 from topology_analyzer import TopologyAnalyzer
 
-# ロギング設定
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -13,15 +12,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # フロントエンドからのアクセスを許可
+CORS(app)
 
-# 環境変数から設定を取得
 PROXMOX_HOST = os.getenv('PROXMOX_HOST', 'https://localhost:8006')
 PROXMOX_TOKEN_ID = os.getenv('PROXMOX_TOKEN_ID', '')
 PROXMOX_TOKEN_SECRET = os.getenv('PROXMOX_TOKEN_SECRET', '')
 VERIFY_SSL = os.getenv('VERIFY_SSL', 'false').lower() == 'true'
 
-# Proxmoxクライアントの初期化
 try:
     proxmox_client = ProxmoxClient(
         host=PROXMOX_HOST,
@@ -37,7 +34,6 @@ except Exception as e:
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """ヘルスチェックエンドポイント"""
     return jsonify({
         'status': 'healthy',
         'proxmox_configured': proxmox_client is not None
@@ -46,17 +42,24 @@ def health_check():
 
 @app.route('/api/topology', methods=['GET'])
 def get_topology():
-    """ネットワークトポロジデータを取得"""
     if not proxmox_client:
         return jsonify({'error': 'Proxmox client not configured'}), 500
-    
+
     try:
+        hide_stopped = request.args.get('hide_stopped', 'true').lower() == 'true'
+        hide_hosts_edges = request.args.get('hide_hosts_edges', 'true').lower() == 'true'
+        hide_physical_node = request.args.get('hide_physical_node', 'true').lower() == 'true'
+
         analyzer = TopologyAnalyzer(proxmox_client)
-        topology = analyzer.analyze_topology()
-        
+        topology = analyzer.analyze_topology(
+            hide_stopped=hide_stopped,
+            hide_hosts_edges=hide_hosts_edges,
+            hide_physical_node=hide_physical_node
+        )
+
         logger.info(f"Topology generated: {topology['summary']}")
         return jsonify(topology)
-    
+
     except Exception as e:
         logger.error(f"Failed to generate topology: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
@@ -64,14 +67,10 @@ def get_topology():
 
 @app.route('/api/nodes', methods=['GET'])
 def get_nodes():
-    """Proxmoxノード一覧を取得"""
     if not proxmox_client:
         return jsonify({'error': 'Proxmox client not configured'}), 500
-    
     try:
-        nodes = proxmox_client.get_nodes()
-        return jsonify(nodes)
-    
+        return jsonify(proxmox_client.get_nodes())
     except Exception as e:
         logger.error(f"Failed to get nodes: {e}")
         return jsonify({'error': str(e)}), 500
@@ -79,14 +78,10 @@ def get_nodes():
 
 @app.route('/api/nodes/<node>/network', methods=['GET'])
 def get_node_network(node):
-    """指定ノードのネットワーク設定を取得"""
     if not proxmox_client:
         return jsonify({'error': 'Proxmox client not configured'}), 500
-    
     try:
-        network = proxmox_client.get_node_network(node)
-        return jsonify(network)
-    
+        return jsonify(proxmox_client.get_node_network(node))
     except Exception as e:
         logger.error(f"Failed to get network for node {node}: {e}")
         return jsonify({'error': str(e)}), 500
@@ -94,37 +89,17 @@ def get_node_network(node):
 
 @app.route('/api/nodes/<node>/vms', methods=['GET'])
 def get_node_vms(node):
-    """指定ノードのVM一覧を取得"""
     if not proxmox_client:
         return jsonify({'error': 'Proxmox client not configured'}), 500
-    
     try:
-        vms = proxmox_client.get_vms(node)
-        return jsonify(vms)
-    
+        return jsonify(proxmox_client.get_vms(node))
     except Exception as e:
         logger.error(f"Failed to get VMs for node {node}: {e}")
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/cluster/status', methods=['GET'])
-def get_cluster_status():
-    """クラスタステータスを取得"""
-    if not proxmox_client:
-        return jsonify({'error': 'Proxmox client not configured'}), 500
-    
-    try:
-        status = proxmox_client.get_cluster_status()
-        return jsonify(status)
-    
-    except Exception as e:
-        logger.error(f"Failed to get cluster status: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/config', methods=['GET'])
 def get_config():
-    """現在の設定情報を取得"""
     return jsonify({
         'proxmox_host': PROXMOX_HOST,
         'verify_ssl': VERIFY_SSL,
@@ -135,6 +110,5 @@ def get_config():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     debug = os.getenv('DEBUG', 'false').lower() == 'true'
-    
     logger.info(f"Starting Flask server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=debug)
