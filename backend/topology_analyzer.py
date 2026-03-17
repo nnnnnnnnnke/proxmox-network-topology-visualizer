@@ -1,6 +1,7 @@
-from typing import Dict, List, Set
+from typing import Dict, List
 import re
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,6 @@ class TopologyAnalyzer:
         return result
 
     def extract_ip_from_config(self, config: Dict) -> List[str]:
-        """cloud-init ipconfig からIPを抽出"""
         ips = []
         for key, value in config.items():
             if key.startswith('ipconfig'):
@@ -35,7 +35,6 @@ class TopologyAnalyzer:
         return ips
 
     def extract_ip_from_lxc_config(self, config: Dict) -> List[str]:
-        """LXCコンテナのnet設定からIPを抽出"""
         ips = []
         for key, value in config.items():
             if key.startswith('net') and isinstance(value, str):
@@ -45,7 +44,6 @@ class TopologyAnalyzer:
         return ips
 
     def extract_agent_ips(self, interfaces: list) -> List[str]:
-        """Guest Agentのインターフェース情報からIPv4を抽出"""
         ips = []
         for iface in interfaces:
             if iface.get('name') == 'lo':
@@ -57,8 +55,61 @@ class TopologyAnalyzer:
                     ips.append(f"{ip}/{prefix}" if prefix else ip)
         return ips
 
+    def _fetch_metadata(self):
+        """メタデータを並列取得"""
+        results = {}
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = {
+                ex.submit(self.client.get_cluster_status): 'cluster_status',
+                ex.submit(self.client.get_sdn_vnets): 'sdn_vnets',
+                ex.submit(self.client.get_sdn_zones): 'sdn_zones',
+                ex.submit(self.client.get_nodes): 'nodes',
+            }
+            for f in as_completed(futs):
+                key = futs[f]
+                try:
+                    results[key] = f.result()
+                except Exception as e:
+                    logger.error(f"Failed to fetch {key}: {e}")
+                    results[key] = [] if key != 'cluster_status' else {}
+        return results
+
+    def _fetch_node_data(self, node_name: str):
+        """ノードのネットワーク設定とVM一覧を並列取得"""
+        results = {}
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futs = {
+                ex.submit(self.client.get_node_network, node_name): 'network',
+                ex.submit(self.client.get_vms, node_name): 'vms',
+            }
+            for f in as_completed(futs):
+                key = futs[f]
+                try:
+                    results[key] = f.result()
+                except Exception as e:
+                    logger.error(f"Failed to fetch {key} for {node_name}: {e}")
+                    results[key] = []
+        return results
+
+    def _fetch_vm_configs_parallel(self, node_name: str, vms: list) -> Dict[int, Dict]:
+        """全VMのconfigを並列取得"""
+        configs = {}
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            futs = {}
+            for vm in vms:
+                vmid = vm['vmid']
+                vm_type = vm.get('type', 'qemu')
+                futs[ex.submit(self.client.get_vm_config, node_name, vmid, vm_type)] = vmid
+            for f in as_completed(futs):
+                vmid = futs[f]
+                try:
+                    configs[vmid] = f.result()
+                except Exception:
+                    configs[vmid] = {}
+        return configs
+
     def analyze_topology(self, hide_stopped=True, hide_hosts_edges=True,
-                         hide_physical_node=True) -> Dict:
+                         hide_physical_node=True, skip_agent=False) -> Dict:
         nodes = []
         edges = []
         networks = {}
@@ -67,9 +118,11 @@ class TopologyAnalyzer:
         stopped_count = 0
         total_vm_count = 0
 
-        # クラスタ情報
+        # Phase 1: メタデータ並列取得
+        meta = self._fetch_metadata()
+
+        cluster_status = meta['cluster_status']
         try:
-            cluster_status = self.client.get_cluster_status()
             cluster_name = next(
                 (item['name'] for item in cluster_status if item['type'] == 'cluster'),
                 'proxmox-cluster'
@@ -77,29 +130,32 @@ class TopologyAnalyzer:
         except Exception:
             cluster_name = 'proxmox-cluster'
 
-        # SDN情報を先に取得
-        sdn_vnets = self.client.get_sdn_vnets()
+        sdn_vnets = meta['sdn_vnets']
         sdn_bridge_names = {vnet['vnet'] for vnet in sdn_vnets}
 
-        # SDN Zone情報を取得
         sdn_zones = {}
-        for zone in self.client.get_sdn_zones():
+        for zone in meta['sdn_zones']:
             sdn_zones[zone.get('zone', '')] = zone
 
-        # SDN Subnet情報を取得
+        # SDN Subnet並列取得
         sdn_subnets = {}
-        for vnet in sdn_vnets:
-            vnet_name = vnet['vnet']
-            subnets = self.client.get_sdn_subnets(vnet_name)
-            if subnets:
-                sdn_subnets[vnet_name] = subnets
+        if sdn_vnets:
+            with ThreadPoolExecutor(max_workers=5) as ex:
+                futs = {ex.submit(self.client.get_sdn_subnets, v['vnet']): v['vnet'] for v in sdn_vnets}
+                for f in as_completed(futs):
+                    vn = futs[f]
+                    try:
+                        result = f.result()
+                        if result:
+                            sdn_subnets[vn] = result
+                    except Exception:
+                        pass
 
-        # Proxmoxノードを取得
-        pve_nodes = self.client.get_nodes()
+        pve_nodes = meta['nodes']
 
-        # 全ノードのVM/コンテナとconfigを先に収集
-        all_vms_data = []  # (node_name, vm, config, vm_type)
-        agent_tasks = []   # Guest Agent取得対象 (node, vmid)
+        # Phase 2: 各ノードのデータ取得 & VM config並列取得
+        all_vms_data = []
+        agent_tasks = []
 
         for pve_node in pve_nodes:
             node_name = pve_node['node']
@@ -116,79 +172,73 @@ class TopologyAnalyzer:
                     'uptime': pve_node.get('uptime', 0)
                 })
 
-            # ネットワーク設定を取得
-            try:
-                network_configs = self.client.get_node_network(node_name)
-                for net_config in network_configs:
-                    iface_name = net_config.get('iface', '')
-                    net_type = net_config.get('type', '')
+            node_data = self._fetch_node_data(node_name)
+            network_configs = node_data['network']
+            vms = node_data['vms']
 
-                    if net_type == 'bridge':
-                        if iface_name not in networks:
-                            networks[iface_name] = {
-                                'id': f"network-{iface_name}",
-                                'label': iface_name,
-                                'type': 'bridge',
-                                'vlan_aware': net_config.get('bridge_vlan_aware', 0),
-                                'cidr': net_config.get('cidr', ''),
-                                'gateway': net_config.get('gateway', ''),
-                                'nodes': []
-                            }
-                        networks[iface_name]['nodes'].append(node_name)
+            # ネットワーク設定を処理
+            for net_config in network_configs:
+                iface_name = net_config.get('iface', '')
+                net_type = net_config.get('type', '')
 
-                        if not hide_physical_node:
-                            edges.append({
-                                'source': node_id,
-                                'target': f"network-{iface_name}",
-                                'type': 'physical_connection',
-                                'interface': iface_name,
-                                'cidr': net_config.get('cidr', ''),
-                                'gateway': net_config.get('gateway', '')
-                            })
+                if net_type == 'bridge':
+                    if iface_name not in networks:
+                        networks[iface_name] = {
+                            'id': f"network-{iface_name}",
+                            'label': iface_name,
+                            'type': 'bridge',
+                            'vlan_aware': net_config.get('bridge_vlan_aware', 0),
+                            'cidr': net_config.get('cidr', ''),
+                            'gateway': net_config.get('gateway', ''),
+                            'nodes': []
+                        }
+                    networks[iface_name]['nodes'].append(node_name)
 
-            except Exception as e:
-                logger.error(f"Failed to get network config for node {node_name}: {e}")
+                    if not hide_physical_node:
+                        edges.append({
+                            'source': node_id,
+                            'target': f"network-{iface_name}",
+                            'type': 'physical_connection',
+                            'interface': iface_name,
+                            'cidr': net_config.get('cidr', ''),
+                            'gateway': net_config.get('gateway', '')
+                        })
 
-            # VM/コンテナを取得してconfigを収集
-            try:
-                vms = self.client.get_vms(node_name)
-                for vm in vms:
-                    vmid = vm['vmid']
-                    vm_type = vm.get('type', 'qemu')
-                    vm_status = vm.get('status', 'unknown')
-                    total_vm_count += 1
+            # 表示対象VMをフィルタ
+            visible_vms = []
+            for vm in vms:
+                vm_status = vm.get('status', 'unknown')
+                total_vm_count += 1
+                if vm_status == 'running':
+                    running_count += 1
+                else:
+                    stopped_count += 1
+                if hide_stopped and vm_status != 'running':
+                    continue
+                visible_vms.append(vm)
 
-                    if vm_status == 'running':
-                        running_count += 1
-                    else:
-                        stopped_count += 1
+            # VM config並列取得
+            configs = self._fetch_vm_configs_parallel(node_name, visible_vms)
 
-                    if hide_stopped and vm_status != 'running':
-                        continue
+            for vm in visible_vms:
+                vmid = vm['vmid']
+                config = configs.get(vmid, {})
+                vm_type = vm.get('type', 'qemu')
 
-                    # VM configを取得
-                    try:
-                        config = self.client.get_vm_config(node_name, vmid, vm_type)
-                    except Exception as e:
-                        logger.warning(f"Failed to get VM config for {vmid}: {e}")
-                        config = {}
+                all_vms_data.append((node_name, vm, config, vm_type))
 
-                    all_vms_data.append((node_name, vm, config, vm_type))
+                # Guest Agent対象を収集
+                if (not skip_agent and vm_type == 'qemu'
+                        and vm.get('status') == 'running'
+                        and config.get('agent', '0').split(',')[0] == '1'):
+                    agent_tasks.append((node_name, vmid))
 
-                    # Guest Agent対象を収集（QEMUかつrunningかつagent有効）
-                    if (vm_type == 'qemu' and vm_status == 'running'
-                            and config.get('agent', '0').split(',')[0] == '1'):
-                        agent_tasks.append((node_name, vmid))
-
-            except Exception as e:
-                logger.error(f"Failed to get VMs for node {node_name}: {e}")
-
-        # Guest Agent情報を並列で一括取得
+        # Phase 3: Guest Agent並列取得
         agent_results = {}
         if agent_tasks:
             agent_results = self.client.get_vm_agent_interfaces_batch(agent_tasks)
 
-        # VM/コンテナ ノードとエッジを構築
+        # Phase 4: ノード・エッジ構築
         for node_name, vm, config, vm_type in all_vms_data:
             vmid = vm['vmid']
             vm_name = vm.get('name', f'VM-{vmid}')
@@ -196,7 +246,7 @@ class TopologyAnalyzer:
             vm_id = f"vm-{node_name}-{vmid}"
             node_id = f"node-{node_name}"
 
-            # IP取得: Guest Agent → cloud-init → LXC config
+            # IP取得
             ips = []
             if vmid in agent_results and agent_results[vmid]:
                 ips = self.extract_agent_ips(agent_results[vmid])
@@ -226,7 +276,6 @@ class TopologyAnalyzer:
                     'label': 'hosts'
                 })
 
-            # ネットワークエッジ
             for key, value in config.items():
                 if key.startswith('net') and isinstance(value, str):
                     net_info = self.parse_network_config(value)
@@ -277,28 +326,23 @@ class TopologyAnalyzer:
                             edge_data['ips'] = ips
                         edges.append(edge_data)
 
-        # ネットワークノードを追加
+        # ネットワーク・VLANノードを追加
         for net_id, net_info in networks.items():
             nodes.append(net_info)
-
-        # VLANノードを追加
         for vlan_key, vlan_info in vlans.items():
             nodes.append(vlan_info)
 
-        # SDN VNetノードを追加
         for vnet in sdn_vnets:
             vnet_name = vnet['vnet']
-            vnet_id = f"sdn-{vnet_name}"
             zone_name = vnet.get('zone', '')
             zone_info = sdn_zones.get(zone_name, {})
             subnets = sdn_subnets.get(vnet_name, [])
-
             subnet_cidrs = [s.get('cidr', '') for s in subnets if s.get('cidr')]
             subnet_gateways = [s.get('gateway', '') for s in subnets if s.get('gateway')]
             snat_enabled = any(s.get('snat', 0) for s in subnets)
 
             nodes.append({
-                'id': vnet_id,
+                'id': f"sdn-{vnet_name}",
                 'label': vnet_name,
                 'type': 'sdn_vnet',
                 'zone': zone_name,
@@ -309,7 +353,7 @@ class TopologyAnalyzer:
                 'snat': snat_enabled,
             })
 
-        # 接続のないネットワークを除去
+        # 孤立ネットワーク除去
         connected_targets = set()
         for e in edges:
             if e['type'] in ('network_connection', 'vlan_connection'):

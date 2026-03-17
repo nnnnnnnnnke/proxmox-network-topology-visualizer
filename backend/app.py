@@ -2,6 +2,8 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
 import logging
+import threading
+import time
 from proxmox_client import ProxmoxClient
 from topology_analyzer import TopologyAnalyzer
 
@@ -18,6 +20,7 @@ PROXMOX_HOST = os.getenv('PROXMOX_HOST', 'https://localhost:8006')
 PROXMOX_TOKEN_ID = os.getenv('PROXMOX_TOKEN_ID', '')
 PROXMOX_TOKEN_SECRET = os.getenv('PROXMOX_TOKEN_SECRET', '')
 VERIFY_SSL = os.getenv('VERIFY_SSL', 'false').lower() == 'true'
+CACHE_TTL = int(os.getenv('CACHE_TTL', '30'))
 
 try:
     proxmox_client = ProxmoxClient(
@@ -32,6 +35,106 @@ except Exception as e:
     proxmox_client = None
 
 
+# --- Topology Cache ---
+class TopologyCache:
+    def __init__(self, client, ttl=30):
+        self.client = client
+        self.ttl = ttl
+        self._cache = {}       # key -> topology data
+        self._timestamps = {}  # key -> last update time
+        self._locks = {}       # key -> threading.Lock
+        self._updating = {}    # key -> bool
+        self._global_lock = threading.Lock()
+
+    def _get_lock(self, key):
+        with self._global_lock:
+            if key not in self._locks:
+                self._locks[key] = threading.Lock()
+                self._updating[key] = False
+            return self._locks[key]
+
+    def _cache_key(self, hide_stopped, hide_hosts_edges, hide_physical_node):
+        return f"{hide_stopped}:{hide_hosts_edges}:{hide_physical_node}"
+
+    def _build(self, hide_stopped, hide_hosts_edges, hide_physical_node, skip_agent=False):
+        analyzer = TopologyAnalyzer(self.client)
+        return analyzer.analyze_topology(
+            hide_stopped=hide_stopped,
+            hide_hosts_edges=hide_hosts_edges,
+            hide_physical_node=hide_physical_node,
+            skip_agent=skip_agent
+        )
+
+    def get(self, hide_stopped, hide_hosts_edges, hide_physical_node):
+        key = self._cache_key(hide_stopped, hide_hosts_edges, hide_physical_node)
+        now = time.time()
+
+        # キャッシュが有効ならそのまま返す
+        if key in self._cache and (now - self._timestamps.get(key, 0)) < self.ttl:
+            return self._cache[key]
+
+        # キャッシュはあるがTTL切れ → キャッシュを返しつつバックグラウンド更新
+        if key in self._cache:
+            self._trigger_background_update(key, hide_stopped, hide_hosts_edges, hide_physical_node)
+            return self._cache[key]
+
+        # キャッシュなし（初回） → Agent抜きで高速取得して返し、フル版をバックグラウンド更新
+        try:
+            data = self._build(hide_stopped, hide_hosts_edges, hide_physical_node, skip_agent=True)
+            self._cache[key] = data
+            self._timestamps[key] = now
+            logger.info(f"Cache populated (fast, no agent): {key}")
+        except Exception as e:
+            logger.error(f"Failed to build topology: {e}")
+            raise
+
+        # Agent付きフル版をバックグラウンドで取得
+        self._trigger_background_update(key, hide_stopped, hide_hosts_edges, hide_physical_node)
+        return data
+
+    def _trigger_background_update(self, key, hide_stopped, hide_hosts_edges, hide_physical_node):
+        lock = self._get_lock(key)
+        with lock:
+            if self._updating.get(key):
+                return
+            self._updating[key] = True
+
+        def update():
+            try:
+                data = self._build(hide_stopped, hide_hosts_edges, hide_physical_node, skip_agent=False)
+                self._cache[key] = data
+                self._timestamps[key] = time.time()
+                logger.info(f"Cache updated (full): {key}")
+            except Exception as e:
+                logger.error(f"Background cache update failed: {e}")
+            finally:
+                with lock:
+                    self._updating[key] = False
+
+        thread = threading.Thread(target=update, daemon=True)
+        thread.start()
+
+    def invalidate(self):
+        self._cache.clear()
+        self._timestamps.clear()
+
+
+topology_cache = TopologyCache(proxmox_client, ttl=CACHE_TTL) if proxmox_client else None
+
+# Gunicorn起動時にキャッシュをウォームアップ
+def warmup_cache():
+    if topology_cache:
+        logger.info("Warming up topology cache...")
+        try:
+            topology_cache.get(True, True, True)
+            logger.info("Cache warmup complete")
+        except Exception as e:
+            logger.error(f"Cache warmup failed: {e}")
+
+warmup_thread = threading.Thread(target=warmup_cache, daemon=True)
+warmup_thread.start()
+
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -42,7 +145,7 @@ def health_check():
 
 @app.route('/api/topology', methods=['GET'])
 def get_topology():
-    if not proxmox_client:
+    if not proxmox_client or not topology_cache:
         return jsonify({'error': 'Proxmox client not configured'}), 500
 
     try:
@@ -50,14 +153,8 @@ def get_topology():
         hide_hosts_edges = request.args.get('hide_hosts_edges', 'true').lower() == 'true'
         hide_physical_node = request.args.get('hide_physical_node', 'true').lower() == 'true'
 
-        analyzer = TopologyAnalyzer(proxmox_client)
-        topology = analyzer.analyze_topology(
-            hide_stopped=hide_stopped,
-            hide_hosts_edges=hide_hosts_edges,
-            hide_physical_node=hide_physical_node
-        )
-
-        logger.info(f"Topology generated: {topology['summary']}")
+        topology = topology_cache.get(hide_stopped, hide_hosts_edges, hide_physical_node)
+        logger.info(f"Topology served: {topology['summary']}")
         return jsonify(topology)
 
     except Exception as e:
